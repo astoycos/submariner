@@ -46,12 +46,38 @@ type testParams struct {
 	ClusterScheduling framework.NetworkPodScheduling
 }
 
+/*
+   - Test environment for external network w/o globalnet is as follows:
+
+                  [ext-app]  [gateway-cluster]  [non-gateway-cluster]
+                     |            |       |        |
+    pseudo-ext *-----+------------+--*    |        |
+                                          |        |
+    kind                            *-----+--------+-------*
+
+
+   - For non-globalnet environment, expected behaviors of connectivity and source IPs are:
+
+       from / to       |  ext-app  |  gateway-cluster  |  non-gateway-cluster  |
+   ------------------- | --------- | ----------------- | --------------------- |
+   ext-app             |    N/A    |       R(*2)       |        R(*2)          |
+   gateway cluster     |    R(*2)  |       N/A         |        R(*1)          |
+   non gateay cluster  |    R(*2)  |       R(*1)       |        N/A            |
+
+   Legend: N: Not reachable, R: Reachable (source IP isn't globalIP),
+           S: Source IP is global IP (and reachable)
+
+   (*1) Not covered in this test, but covered in normal connectivity tests.
+   (*2) Pod w/ hostnetwork isn't reachable.
+*/
+
 var _ = Describe("[external-dataplane] Connectivity", func() {
 	f := framework.NewFramework("ext-dataplane")
 
 	var toEndpointType tcp.EndpointType
 	var networking framework.NetworkingType
 	var cluster framework.ClusterIndex
+	var err error
 
 	verifyInteraction := func(clusterScheduling framework.NetworkPodScheduling) {
 		It("should be able to connect from an external app to a pod in a cluster", func() {
@@ -70,9 +96,10 @@ var _ = Describe("[external-dataplane] Connectivity", func() {
 		})
 	}
 
-	When("In an external-app-connected cluster", func() {
+	When("connected from a gateway-cluster", func() {
 		BeforeEach(func() {
-			cluster = getExternalClusterIndex(framework.TestContext.ClusterIDs)
+			cluster, err = getGatewayClusterIndex(framework.TestContext.ClusterIDs)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		When("a pod connects via TCP to a remote pod", func() {
@@ -104,9 +131,10 @@ var _ = Describe("[external-dataplane] Connectivity", func() {
 		// Access from a hostnetwork pod to external apps is not supported
 	})
 
-	When("In a non-external-app-connected cluster", func() {
+	When("connected from a non-gateway-cluster", func() {
 		BeforeEach(func() {
-			cluster = getNonExternalClusterIndex(framework.TestContext.ClusterIDs)
+			cluster, err = getNonGatewayClusterIndex(framework.TestContext.ClusterIDs)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		When("a pod connects via TCP to a remote pod", func() {
@@ -144,7 +172,7 @@ var _ = Describe("[external-dataplane] Connectivity", func() {
 })
 
 func testExternalConnectivity(p testParams) {
-	externalClusterName := getExternalClusterName(framework.TestContext.ClusterIDs)
+	externalClusterName := getGatewayClusterName(framework.TestContext.ClusterIDs)
 
 	clusterName := framework.TestContext.ClusterIDs[p.Cluster]
 
@@ -172,13 +200,16 @@ func testExternalConnectivity(p testParams) {
 
 	var targetIP string
 
+	//nolint // golangci/golangci-lint#1372
 	switch p.ToEndpointType {
+	default:
+		fallthrough
+	case tcp.GlobalPodIP, tcp.GlobalServiceIP:
+		framework.Failf("Unsupported ToEndpointType %v was passed", p.ToEndpointType)
 	case tcp.PodIP:
 		targetIP = podIP
 	case tcp.ServiceIP:
 		targetIP = svcIP
-	default:
-		framework.Failf("Unsupported ToEndpointType %v was passed", p.ToEndpointType)
 	}
 
 	By(fmt.Sprintf("Sending an http request from external app %q to %q in the cluster %q",
@@ -216,7 +247,7 @@ func testExternalConnectivity(p testParams) {
 
 // The first cluster is chosen as the one connected to external application.
 // See scripts/e2e/external/utils.
-func getExternalClusterName(names []string) string {
+func getGatewayClusterName(names []string) string {
 	if len(names) == 0 {
 		return ""
 	}
@@ -228,28 +259,28 @@ func getExternalClusterName(names []string) string {
 	return sortedNames[0]
 }
 
-func getExternalClusterIndex(names []string) framework.ClusterIndex {
-	clusterName := getExternalClusterName(names)
+func getGatewayClusterIndex(names []string) (framework.ClusterIndex, error) {
+	clusterName := getGatewayClusterName(names)
 
 	for idx, cid := range names {
 		if cid == clusterName {
-			return framework.ClusterIndex(idx)
+			return framework.ClusterIndex(idx), nil
 		}
 	}
 
-	// TODO: consider right error handling.
-	return framework.ClusterIndex(0)
+	return framework.ClusterIndex(0),
+		fmt.Errorf("failed to find gateway-cluster (gateway-cluster name: %s, cluster names: %v)", clusterName, names)
 }
 
-func getNonExternalClusterIndex(names []string) framework.ClusterIndex {
-	clusterName := getExternalClusterName(names)
+func getNonGatewayClusterIndex(names []string) (framework.ClusterIndex, error) {
+	clusterName := getGatewayClusterName(names)
 
 	for idx, cid := range names {
 		if cid != clusterName {
-			return framework.ClusterIndex(idx)
+			return framework.ClusterIndex(idx), nil
 		}
 	}
 
-	// TODO: consider right error handling
-	return framework.ClusterIndex(0)
+	return framework.ClusterIndex(0),
+		fmt.Errorf("failed to find non-gateway-cluster (gateway-cluster name: %s, cluster names: %v)", clusterName, names)
 }
