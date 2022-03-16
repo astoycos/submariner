@@ -32,41 +32,46 @@ func (kp *SyncHandler) LocalEndpointCreated(endpoint *submV1.Endpoint) error {
 	defer kp.syncHandlerMutex.Unlock()
 	kp.localCableDriver = endpoint.Spec.Backend
 
+	kp.isGatewayNode = false
+	localClusterGwNodeIP := net.ParseIP(endpoint.Spec.PrivateIP)
+
+	remoteVtepIP, err := getVxlanVtepIPAddress(localClusterGwNodeIP.String())
+	if err != nil {
+		return errors.Wrap(err, "failed to derive the remoteVtepIP")
+	}
+
 	// We are on nonGateway node
 	if endpoint.Spec.Hostname != kp.hostname {
 		// If the node already has a vxLAN interface that points to an oldEndpoint
 		// (i.e., during gateway migration), delete it.
-		if kp.vxlanDevice != nil && kp.vxlanDevice.activeEndpointHostname != endpoint.Spec.Hostname {
-			err := kp.vxlanDevice.deleteVxLanIface()
-			if err != nil {
-				return errors.Wrapf(err, "failed to delete the the vxlan interface that points to old endpoint %s",
-					kp.vxlanDevice.activeEndpointHostname)
+		for vxlanDevice, _ := range kp.vxlanDevices {
+			if vxlanDevice != nil && kp.vxlanDevices[vxlanDevice] == &remoteVtepIP && vxlanDevice.endpointHostname != endpoint.Spec.Hostname {
+				klog.Info("Deleting ")
+				err := vxlanDevice.deleteVxLanIface()
+				if err != nil {
+					return errors.Wrapf(err, "failed to delete the the vxlan interface that points to old endpoint %s",
+						vxlanDevice.endpointHostname)
+				}
+
+				vxlanDevice = nil
 			}
-
-			kp.vxlanDevice = nil
 		}
 
-		kp.isGatewayNode = false
-		localClusterGwNodeIP := net.ParseIP(endpoint.Spec.PrivateIP)
+		klog.Infof("Creating the vxlan interface with gateway node IP %s", localClusterGwNodeIP)
 
-		remoteVtepIP, err := getVxlanVtepIPAddress(localClusterGwNodeIP.String())
-		if err != nil {
-			return errors.Wrap(err, "failed to derive the remoteVtepIP")
-		}
-
-		klog.Infof("Creating the vxlan interface %s with gateway node IP %s", VxLANIface, localClusterGwNodeIP)
-
-		err = kp.createVxLANInterface(endpoint.Spec.Hostname, VxInterfaceWorker, localClusterGwNodeIP)
+		vxlanDevice, err := kp.createVxLANInterface(endpoint.Spec.Hostname, VxInterfaceWorker, localClusterGwNodeIP)
 		if err != nil {
 			klog.Fatalf("Unable to create VxLAN interface on non-GatewayNode (%s): %v", endpoint.Spec.Hostname, err)
 		}
 
-		kp.vxlanGwIP = &remoteVtepIP
+		kp.vxlanDevices[vxlanDevice] = &remoteVtepIP
 
-		err = kp.reconcileRoutes(remoteVtepIP)
-		if err != nil {
-			return errors.Wrap(err, "error while reconciling routes")
-		}
+		// This is where NextHopGroup will need to go, reconcile NHG for all possible Tunnels to all possible gateways
+		// err = kp.reconcileRoutes(remoteVtepIP)
+		// if err != nil {
+		// 	return errors.Wrap(err, "error while reconciling routes")
+		// }
+
 	}
 
 	return nil
@@ -82,13 +87,16 @@ func (kp *SyncHandler) LocalEndpointRemoved(endpoint *submV1.Endpoint) error {
 	kp.isGatewayNode = false
 
 	// If the vxLAN device exists and it points to the same endpoint, delete it.
-	if kp.vxlanDevice != nil && kp.vxlanDevice.activeEndpointHostname == endpoint.Spec.Hostname {
-		err := kp.vxlanDevice.deleteVxLanIface()
-		kp.vxlanDevice = nil
-		kp.vxlanGwIP = nil
+	for vxlanDevice, _ := range kp.vxlanDevices {
+		if vxlanDevice != nil && vxlanDevice.endpointHostname == endpoint.Spec.Hostname {
+			err := vxlanDevice.deleteVxLanIface()
+			vxlanDevice = nil
 
-		if err != nil {
-			return errors.Wrap(err, "failed to delete the the vxlan interface on Endpoint removal")
+			kp.vxlanDevices[vxlanDevice] = nil
+
+			if err != nil {
+				return errors.Wrap(err, "failed to delete the the vxlan interface on Endpoint removal")
+			}
 		}
 	}
 

@@ -49,9 +49,9 @@ type SyncHandler struct {
 	isGatewayNode        bool
 	wasGatewayPreviously bool
 
-	netLink          netlink.Interface
-	vxlanDevice      *vxLanIface
-	vxlanGwIP        *net.IP
+	netLink netlink.Interface
+	// Each tunnel will correspond to a single GW
+	vxlanDevices     map[*vxLanIface]*net.IP
 	hostname         string
 	cniIface         *cni.Interface
 	defaultHostIface *net.Interface
@@ -70,6 +70,7 @@ func NewSyncHandler(localClusterCidr, localServiceCidr []string) *SyncHandler {
 		isGatewayNode:           false,
 		wasGatewayPreviously:    false,
 		netLink:                 netlink.New(),
+		vxlanDevices:            map[*vxLanIface]*net.IP{},
 	}
 }
 

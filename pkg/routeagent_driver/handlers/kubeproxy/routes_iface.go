@@ -266,41 +266,41 @@ func (kp *SyncHandler) updateRoutingRulesForInterClusterSupport(remoteCIDRs []st
 		// These rules are required only on the nonGatewayNode.
 		return nil
 	}
-
-	if kp.vxlanDevice != nil && kp.vxlanGwIP != nil {
-		link, err := kp.netLink.LinkByName(VxLANIface)
-		if err != nil {
-			return errors.Wrapf(err, "error retrieving link by name %s", VxLANIface)
-		}
-
-		for _, cidrBlock := range remoteCIDRs {
-			_, dst, err := net.ParseCIDR(cidrBlock)
+	for vxlanDevice, vxlanGwIP := range kp.vxlanDevices {
+		if vxlanDevice != nil && vxlanGwIP != nil {
+			link, err := kp.netLink.LinkByName(VxLANIface)
 			if err != nil {
-				return errors.Wrapf(err, "error parsing cidr block %s", cidrBlock)
+				return errors.Wrapf(err, "error retrieving link by name %s", VxLANIface)
 			}
 
-			route := netlink.Route{
-				Dst:       dst,
-				Gw:        *kp.vxlanGwIP,
-				Scope:     unix.RT_SCOPE_UNIVERSE,
-				LinkIndex: link.Attrs().Index,
-				Protocol:  4,
-			}
-
-			if operation == Add {
-				err = kp.netLink.RouteAdd(&route)
+			for _, cidrBlock := range remoteCIDRs {
+				_, dst, err := net.ParseCIDR(cidrBlock)
 				if err != nil {
-					return errors.Wrapf(err, "error adding route %s", route)
+					return errors.Wrapf(err, "error parsing cidr block %s", cidrBlock)
 				}
-			} else if operation == Delete {
-				err = kp.netLink.RouteDel(&route)
-				if err != nil {
-					return errors.Wrapf(err, "error deleting route %s", route)
+
+				route := netlink.Route{
+					Dst:       dst,
+					Gw:        *vxlanGwIP,
+					Scope:     unix.RT_SCOPE_UNIVERSE,
+					LinkIndex: link.Attrs().Index,
+					Protocol:  4,
+				}
+
+				if operation == Add {
+					err = kp.netLink.RouteAdd(&route)
+					if err != nil {
+						return errors.Wrapf(err, "error adding route %s", route)
+					}
+				} else if operation == Delete {
+					err = kp.netLink.RouteDel(&route)
+					if err != nil {
+						return errors.Wrapf(err, "error deleting route %s", route)
+					}
 				}
 			}
 		}
 	}
-
 	return nil
 }
 
