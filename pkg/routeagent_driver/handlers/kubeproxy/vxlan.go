@@ -96,6 +96,8 @@ func (kp *SyncHandler) createOrUpdateVxLanIface(iface *vxLanIface) error {
 			return nil
 		}
 
+		klog.V(log.DEBUG).Info("Creating interface %s", VxLANIface)
+
 		// Config does not match, delete the existing interface and re-create it.
 		if err = kp.netLink.LinkDel(existing); err != nil {
 			return errors.Wrap(err, "failed to delete the existing vxlan interface")
@@ -163,60 +165,99 @@ func (iface *vxLanIface) configureIPAddress(ipAddress net.IP, mask net.IPMask) e
 	return nil
 }
 
-func (iface *vxLanIface) AddFDB(ipAddress net.IP, hwAddr string) error {
+func buildNeighbors(hwAddr string, linkIndex int, addresses ...string) ([]netlink.Neigh, error) {
 	macAddr, err := net.ParseMAC(hwAddr)
 	if err != nil {
-		return errors.Wrapf(err, "invalid MAC Address (%s) supplied", hwAddr)
+		return nil, errors.Wrapf(err, "invalid MAC Address (%s) supplied", hwAddr)
 	}
 
-	if ipAddress == nil {
-		return errors.Errorf("invalid ipAddress (%v) supplied", ipAddress)
+	if len(addresses) == 0 {
+		return nil, errors.Errorf("invalid ipAddresses (%v) supplied", addresses)
 	}
 
-	neigh := &netlink.Neigh{
-		LinkIndex:    iface.link.Index,
-		Family:       unix.AF_BRIDGE,
-		Flags:        netlink.NTF_SELF,
-		Type:         netlink.NDA_DST,
-		IP:           ipAddress,
-		State:        netlink.NUD_PERMANENT | netlink.NUD_NOARP,
-		HardwareAddr: macAddr,
+	neighbors := []netlink.Neigh{}
+	for _, address := range addresses {
+		neighbors = append(neighbors, netlink.Neigh{
+			LinkIndex:    linkIndex,
+			Family:       unix.AF_BRIDGE,
+			Flags:        netlink.NTF_SELF,
+			Type:         netlink.NDA_DST,
+			IP:           net.ParseIP(address),
+			State:        netlink.NUD_PERMANENT | netlink.NUD_NOARP,
+			HardwareAddr: macAddr,
+		})
 	}
 
-	err = iface.netLink.NeighAppend(neigh)
-	if err != nil {
-		return errors.Wrapf(err, "unable to add the bridge fdb entry %v", neigh)
-	}
-
-	klog.V(log.DEBUG).Infof("Successfully added the bridge fdb entry %v", neigh)
-
-	return nil
+	return neighbors, nil
 }
 
-func (iface *vxLanIface) DelFDB(ipAddress net.IP, hwAddr string) error {
-	macAddr, err := net.ParseMAC(hwAddr)
+// func (iface *vxLanIface) AddFDB(ipAddress net.IP, hwAddr string) error {
+// 	macAddr, err := net.ParseMAC(hwAddr)
+// 	if err != nil {
+// 		return errors.Wrapf(err, "invalid MAC Address (%s) supplied", hwAddr)
+// 	}
+
+// 	if ipAddress == nil {
+// 		return errors.Errorf("invalid ipAddress (%v) supplied", ipAddress)
+// 	}
+
+// 	neigh := &netlink.Neigh{
+// 		LinkIndex:    iface.link.Index,
+// 		Family:       unix.AF_BRIDGE,
+// 		Flags:        netlink.NTF_SELF,
+// 		Type:         netlink.NDA_DST,
+// 		IP:           ipAddress,
+// 		State:        netlink.NUD_PERMANENT | netlink.NUD_NOARP,
+// 		HardwareAddr: macAddr,
+// 	}
+
+// 	err = iface.netLink.NeighAppend(neigh)
+// 	if err != nil {
+// 		return errors.Wrapf(err, "unable to add the bridge fdb entry %v", neigh)
+// 	}
+
+// 	klog.V(log.DEBUG).Infof("Successfully added the bridge fdb entry %v", neigh)
+
+// 	return nil
+// }
+
+// func (iface *vxLanIface) DelFDB(ipAddress net.IP, hwAddr string) error {
+// 	macAddr, err := net.ParseMAC(hwAddr)
+// 	if err != nil {
+// 		return errors.Wrapf(err, "invalid MAC Address (%s) supplied", hwAddr)
+// 	}
+
+// 	neigh := &netlink.Neigh{
+// 		LinkIndex:    iface.link.Index,
+// 		Family:       unix.AF_BRIDGE,
+// 		Flags:        netlink.NTF_SELF,
+// 		Type:         netlink.NDA_DST,
+// 		IP:           ipAddress,
+// 		State:        netlink.NUD_PERMANENT | netlink.NUD_NOARP,
+// 		HardwareAddr: macAddr,
+// 	}
+
+// 	err = iface.netLink.NeighDel(neigh)
+// 	if err != nil {
+// 		return errors.Wrapf(err, "unable to delete the bridge fdb entry %v", neigh)
+// 	}
+
+// 	klog.V(log.DEBUG).Infof("Successfully deleted the bridge fdb entry %v", neigh)
+
+// 	return nil
+// }
+
+func (iface *vxLanIface) ListFDB() (map[string]netlink.Neigh, error) {
+	rawFdbEntries, err := iface.netLink.NeighList(iface.link.Index, unix.AF_BRIDGE)
 	if err != nil {
-		return errors.Wrapf(err, "invalid MAC Address (%s) supplied", hwAddr)
+		return nil, errors.Wrapf(err, "unable to list the bridge fdb entries %v")
 	}
 
-	neigh := &netlink.Neigh{
-		LinkIndex:    iface.link.Index,
-		Family:       unix.AF_BRIDGE,
-		Flags:        netlink.NTF_SELF,
-		Type:         netlink.NDA_DST,
-		IP:           ipAddress,
-		State:        netlink.NUD_PERMANENT | netlink.NUD_NOARP,
-		HardwareAddr: macAddr,
+	fbdEntries := map[string]netlink.Neigh{}
+	for _, fdbEntry := range rawFdbEntries {
+		fbdEntries[fdbEntry.IP.String()] = fdbEntry
 	}
-
-	err = iface.netLink.NeighDel(neigh)
-	if err != nil {
-		return errors.Wrapf(err, "unable to delete the bridge fdb entry %v", neigh)
-	}
-
-	klog.V(log.DEBUG).Infof("Successfully deleted the bridge fdb entry %v", neigh)
-
-	return nil
+	return fbdEntries, nil
 }
 
 func getVxlanVtepIPAddress(ipAddr string) (net.IP, error) {
@@ -231,7 +272,7 @@ func getVxlanVtepIPAddress(ipAddr string) (net.IP, error) {
 	return vxlanIP, nil
 }
 
-func (kp *SyncHandler) createVxLANInterface(activeEndPoint string, ifaceType int) error {
+func (kp *SyncHandler) updateVxLANInterface(activeEndPoint string, isGwNode bool) error {
 	ipAddr, err := kp.getHostIfaceIPAddress()
 	if err != nil {
 		return errors.Wrap(err, "unable to retrieve the IPv4 address on the Host")
@@ -249,10 +290,11 @@ func (kp *SyncHandler) createVxLANInterface(activeEndPoint string, ifaceType int
 
 	// add FDB entries for the ends of the tunnel, for GW nodes it's the remote cluster
 	// networks, for non-GW nodes it's all other GW node addresses
-	if ifaceType == VxInterfaceGateway {
-		tunnelRemotes = kp.remoteVTEPs.Elements()
+	if isGwNode {
+		// We only want to setup FDP entries on Gateway nodes for non-GW nodes
+		tunnelRemotes = kp.gwIPs.Difference(kp.remoteVTEPs)
 		subNode = "Gateway"
-	} else if ifaceType == VxInterfaceWorker {
+	} else {
 		tunnelRemotes = kp.gwIPs.Elements()
 		subNode = "Non-Gateway"
 	}
@@ -266,30 +308,77 @@ func (kp *SyncHandler) createVxLANInterface(activeEndPoint string, ifaceType int
 		mtu:      vxlanMtu,
 	}
 
-	// Only create the actual interface if needed
-	kp.vxlanDevice, err = kp.newVxlanIface(attrs, activeEndPoint)
-	if err != nil {
-		return errors.Wrapf(err, "failed to create vxlan interface on %s Node", subNode)
-	}
-
-	klog.V(log.DEBUG).Infof("Adding FDBs %v on %q for a %s node", tunnelRemotes, VxLANIface, subNode)
-	for _, fdbAddress := range tunnelRemotes {
-		err = kp.vxlanDevice.AddFDB(net.ParseIP(fdbAddress), "00:00:00:00:00:00")
+	// We only need to actually make the submariner-vxlan interface a single time
+	// on all nodes, then jsut reconcile the fdb entries
+	if kp.vxlanDevice == nil {
+		kp.vxlanDevice, err = kp.newVxlanIface(attrs, activeEndPoint)
 		if err != nil {
-			return errors.Wrapf(err, "failed to add FDB entry on the %s vxlan iface", subNode)
+			return errors.Wrapf(err, "failed to create vxlan interface on %s Node", subNode)
+		}
+
+		err = kp.netLink.EnableLooseModeReversePathFilter(VxLANIface)
+		if err != nil {
+			return errors.Wrap(err, "error enabling loose mode")
+		}
+
+		klog.V(log.DEBUG).Infof("Successfully configured reverse path filter to loose mode on %q", VxLANIface)
+
+		err = kp.vxlanDevice.configureIPAddress(vtepIP, net.CIDRMask(8, 32))
+		if err != nil {
+			return errors.Wrap(err, "failed to configure vxlan interface ipaddress on the Gateway Node")
 		}
 	}
 
-	err = kp.netLink.EnableLooseModeReversePathFilter(VxLANIface)
+	// Always update the FDB rules regardless, by first deleting
+	klog.V(log.DEBUG).Infof("Reconciling desired FDBs %v on %q for a %s node", tunnelRemotes, VxLANIface, subNode)
+	kp.reconcileVxSubFdbEntries(tunnelRemotes...)
+
+	return nil
+}
+
+func (kp *SyncHandler) reconcileVxSubFdbEntries(destinations ...string) error {
+	existingEntries, err := kp.vxlanDevice.ListFDB()
 	if err != nil {
-		return errors.Wrap(err, "error enabling loose mode")
+		return errors.Wrap(err, "failed to list existing FDB entries")
+	}
+	klog.V(log.DEBUG).Infof("Existing FDB entries on vx-submariner: %v", existingEntries)
+
+	destinationsToAdd := []string{}
+
+	for _, address := range destinations {
+		// FDB entry does not exist
+		if _, ok := existingEntries[address]; !ok {
+			destinationsToAdd = append(destinationsToAdd, address)
+			continue
+		}
+		// FDB entry does exist and needs to be kept, remove from
+		// existing entries
+		delete(existingEntries, address)
 	}
 
-	klog.V(log.DEBUG).Infof("Successfully configured reverse path filter to loose mode on %q", VxLANIface)
+	// Delete stale entries, i.e whatever wasn't removed from existingEntties
+	for _, neighbor := range existingEntries {
+		err = kp.vxlanDevice.netLink.NeighDel(&neighbor)
+		if err != nil {
+			return errors.Wrapf(err, "unable to delete the bridge fdb entry %v", neighbor)
+		}
 
-	err = kp.vxlanDevice.configureIPAddress(vtepIP, net.CIDRMask(8, 32))
+		klog.V(log.DEBUG).Infof("Successfully deleted the bridge fdb entry %v", neighbor)
+	}
+
+	// Build new entries
+	desiredEntries, err := buildNeighbors("00:00:00:00:00:00", kp.vxlanDevice.link.Index, destinationsToAdd...)
 	if err != nil {
-		return errors.Wrap(err, "failed to configure vxlan interface ipaddress on the Gateway Node")
+		return errors.Wrap(err, "failed to generate desired FDB entries")
+	}
+
+	for _, neighbor := range desiredEntries {
+		err = kp.vxlanDevice.netLink.NeighAppend(&neighbor)
+		if err != nil {
+			return errors.Wrapf(err, "unable to add the bridge fdb entry %v", neighbor)
+		}
+
+		klog.V(log.DEBUG).Infof("Successfully added the bridge fdb entry %v", neighbor)
 	}
 
 	return nil

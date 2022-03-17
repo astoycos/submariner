@@ -41,7 +41,7 @@ type SyncHandler struct {
 
 	remoteSubnets  stringset.Interface
 	remoteSubnetGw map[string]net.IP
-	// Local Cluster Node IPs
+	// Local Cluster Node IPs Non GW Node IPS
 	remoteVTEPs             stringset.Interface
 	routeCacheGWNode        stringset.Interface
 	remoteEndpointTimeStamp map[string]v1.Time
