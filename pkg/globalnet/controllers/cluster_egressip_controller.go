@@ -29,7 +29,6 @@ import (
 	"github.com/submariner-io/admiral/pkg/util"
 	submarinerv1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
 	"github.com/submariner-io/submariner/pkg/globalnet/constants"
-	"github.com/submariner-io/submariner/pkg/globalnet/controllers/iptables"
 	"github.com/submariner-io/submariner/pkg/globalnet/metrics"
 	"github.com/submariner-io/submariner/pkg/ipam"
 	corev1 "k8s.io/api/core/v1"
@@ -47,13 +46,8 @@ func NewClusterGlobalEgressIPController(config *syncer.ResourceSyncerConfig, loc
 
 	klog.Info("Creating ClusterGlobalEgressIP controller")
 
-	iptIface, err := iptables.New()
-	if err != nil {
-		return nil, errors.WithMessage(err, "error creating the IPTablesInterface handler")
-	}
-
 	controller := &clusterGlobalEgressIPController{
-		baseIPAllocationController: newBaseIPAllocationController(pool, iptIface),
+		baseIPAllocationController: newBaseIPAllocationController(pool),
 		localSubnets:               localSubnets,
 	}
 
@@ -91,7 +85,7 @@ func NewClusterGlobalEgressIPController(config *syncer.ResourceSyncerConfig, loc
 	if obj != nil {
 		err := controller.reserveAllocatedIPs(federator, obj, func(reservedIPs []string) error {
 			metrics.RecordAllocateClusterGlobalEgressIPs(pool.GetCIDR(), len(reservedIPs))
-			return controller.programClusterGlobalEgressRules(reservedIPs)
+			return nil
 		})
 		if err != nil {
 			return nil, err
@@ -142,7 +136,8 @@ func (c *clusterGlobalEgressIPController) process(from runtime.Object, numRequeu
 
 		return checkStatusChanged(&prevStatus, &clusterGlobalEgressIP.Status, clusterGlobalEgressIP), requeue
 	case syncer.Delete:
-		return nil, c.onDelete(key, &clusterGlobalEgressIP.Status, numRequeues)
+		c.releaseIPs(key, clusterGlobalEgressIP.Status.AllocatedIPs...)
+		return nil, false
 	}
 
 	return nil, false
@@ -191,49 +186,13 @@ func (c *clusterGlobalEgressIPController) onCreateOrUpdate(key string, numberOfI
 		return false
 	}
 
-	if requeue := c.flushRulesAndReleaseIPs(key, numRequeues, c.flushClusterGlobalEgressRules,
-		status.AllocatedIPs...); requeue {
-		return true
-	}
+	c.releaseIPs(key, status.AllocatedIPs...)
 
 	return c.allocateGlobalIPs(key, numberOfIPs, status)
 }
 
-func (c *clusterGlobalEgressIPController) onDelete(key string, status *submarinerv1.GlobalEgressIPStatus, numRequeues int) bool {
-	return c.flushRulesAndReleaseIPs(key, numRequeues, c.flushClusterGlobalEgressRules,
-		status.AllocatedIPs...)
-}
-
-func (c *clusterGlobalEgressIPController) flushClusterGlobalEgressRules(allocatedIPs []string) error {
-	metrics.RecordDeallocateClusterGlobalEgressIPs(c.pool.GetCIDR(), len(allocatedIPs))
-	return c.deleteClusterGlobalEgressRules(c.localSubnets, getTargetSNATIPaddress(allocatedIPs))
-}
-
-func (c *clusterGlobalEgressIPController) deleteClusterGlobalEgressRules(srcIPList []string, snatIP string) error {
-	for _, srcIP := range srcIPList {
-		if err := c.iptIface.RemoveClusterEgressRules(srcIP, snatIP, globalNetIPTableMark); err != nil {
-			return err // nolint:wrapcheck  // Let the caller wrap it
-		}
-	}
-
-	return nil
-}
-
-func (c *clusterGlobalEgressIPController) programClusterGlobalEgressRules(allocatedIPs []string) error {
-	snatIP := getTargetSNATIPaddress(allocatedIPs)
-	egressRulesProgrammed := []string{}
-
-	for _, srcIP := range c.localSubnets {
-		if err := c.iptIface.AddClusterEgressRules(srcIP, snatIP, globalNetIPTableMark); err != nil {
-			_ = c.deleteClusterGlobalEgressRules(egressRulesProgrammed, snatIP)
-
-			return err // nolint:wrapcheck  // Let the caller wrap it
-		}
-
-		egressRulesProgrammed = append(egressRulesProgrammed, srcIP)
-	}
-
-	return nil
+func (c *clusterGlobalEgressIPController) onDelete(key string, status *submarinerv1.GlobalEgressIPStatus, numRequeues int) {
+	c.releaseIPs(key, status.AllocatedIPs...)
 }
 
 func (c *clusterGlobalEgressIPController) allocateGlobalIPs(key string, numberOfIPs int, status *submarinerv1.GlobalEgressIPStatus) bool {
@@ -259,28 +218,13 @@ func (c *clusterGlobalEgressIPController) allocateGlobalIPs(key string, numberOf
 		return true
 	}
 
-	err = c.programClusterGlobalEgressRules(allocatedIPs)
-	if err != nil {
-		klog.Errorf("Error programming egress IP table rules for %q: %v", key, err)
-
-		status.Conditions = util.TryAppendCondition(status.Conditions, &metav1.Condition{
-			Type:    string(submarinerv1.GlobalEgressIPAllocated),
-			Status:  metav1.ConditionFalse,
-			Reason:  "ProgramIPTableRulesFailed",
-			Message: fmt.Sprintf("Error programming egress rules: %v", err),
-		})
-
-		_ = c.pool.Release(allocatedIPs...)
-
-		return true
-	}
-
 	metrics.RecordAllocateClusterGlobalEgressIPs(c.pool.GetCIDR(), numberOfIPs)
 
+	// Once iptables rules are programed this will be set to true
 	status.Conditions = util.TryAppendCondition(status.Conditions, &metav1.Condition{
 		Type:    string(submarinerv1.GlobalEgressIPAllocated),
-		Status:  metav1.ConditionTrue,
-		Reason:  "Success",
+		Status:  metav1.ConditionFalse,
+		Reason:  "ProgramIPTablesRules Not Yet Occured",
 		Message: fmt.Sprintf("Allocated %d global IP(s)", numberOfIPs),
 	})
 

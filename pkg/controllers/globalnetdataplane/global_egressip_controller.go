@@ -16,24 +16,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package globalnetdataplane
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/base32"
 	"fmt"
+	"os"
 
 	"github.com/pkg/errors"
 	"github.com/submariner-io/admiral/pkg/federate"
-	"github.com/submariner-io/admiral/pkg/log"
 	"github.com/submariner-io/admiral/pkg/syncer"
 	"github.com/submariner-io/admiral/pkg/util"
 	"github.com/submariner-io/admiral/pkg/watcher"
 	submarinerv1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
-	"github.com/submariner-io/submariner/pkg/globalnet/metrics"
 	"github.com/submariner-io/submariner/pkg/ipam"
 	"github.com/submariner-io/submariner/pkg/ipset"
+	"github.com/submariner-io/submariner/pkg/iptables"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,11 +46,10 @@ func NewGlobalEgressIPController(config *syncer.ResourceSyncerConfig, pool *ipam
 	// We'll panic if config is nil, this is intentional
 	var err error
 
-	klog.Info("Creating GlobalEgressIP controller")
+	klog.Info("Creating GlobalEgressIP dataplane controller")
 
 	controller := &globalEgressIPController{
-		baseIPAllocationController: newBaseIPAllocationController(pool),
-		podWatchers:                map[string]*egressPodWatcher{},
+		podWatchers: map[string]*egressPodWatcher{},
 		watcherConfig: watcher.Config{
 			RestMapper: config.RestMapper,
 			Client:     config.SourceClient,
@@ -59,35 +57,16 @@ func NewGlobalEgressIPController(config *syncer.ResourceSyncerConfig, pool *ipam
 		},
 	}
 
+	iptIface, err := iptables.New()
+	if err != nil {
+		return nil, errors.WithMessage(err, "error creating the IPTablesInterface handler")
+	}
+
+	controller.ipt = iptIface
+
 	controller.ipSetIface = ipset.New(utilexec.New())
 
-	_, gvr, err := util.ToUnstructuredResource(&submarinerv1.GlobalEgressIP{}, config.RestMapper)
-	if err != nil {
-		return nil, errors.Wrap(err, "error converting resource")
-	}
-
-	client := config.SourceClient.Resource(*gvr).Namespace(corev1.NamespaceAll)
-
-	list, err := client.List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return nil, errors.Wrap(err, "error listing the resources")
-	}
-
 	federator := federate.NewUpdateFederator(config.SourceClient, config.RestMapper, corev1.NamespaceAll)
-
-	for i := range list.Items {
-		err = controller.reserveAllocatedIPs(federator, &list.Items[i], func(reservedIPs []string) error {
-			metrics.RecordAllocateGlobalEgressIPs(pool.GetCIDR(), len(reservedIPs))
-			specObj := util.GetSpec(&list.Items[i])
-			spec := &submarinerv1.GlobalEgressIPSpec{}
-			_ = runtime.DefaultUnstructuredConverter.FromUnstructured(specObj.(map[string]interface{}), spec)
-			return nil
-		})
-
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	controller.resourceSyncer, err = syncer.NewResourceSyncer(&syncer.ResourceSyncerConfig{
 		Name:                "GlobalEgressIP syncer",
@@ -122,9 +101,13 @@ func (c *globalEgressIPController) Stop() {
 func (c *globalEgressIPController) process(from runtime.Object, numRequeues int, op syncer.Operation) (runtime.Object, bool) {
 	globalEgressIP := from.(*submarinerv1.GlobalEgressIP)
 
+	// We need some better early exit paths here to ensure that the allocation has already happened,
+	// maybe looking in the conditions?
 	numberOfIPs := 1
 	if globalEgressIP.Spec.NumberOfIPs != nil {
 		numberOfIPs = *globalEgressIP.Spec.NumberOfIPs
+	} else {
+
 	}
 
 	key, _ := cache.MetaNamespaceKeyFunc(globalEgressIP)
@@ -133,6 +116,9 @@ func (c *globalEgressIPController) process(from runtime.Object, numRequeues int,
 		numberOfIPs, globalEgressIP.Spec.PodSelector, globalEgressIP.Status)
 
 	switch op {
+
+	// (astoycos)TODO this probably only needs to be done on update, since we should be responding to Updates only from the
+	// globalnet controller
 	case syncer.Create, syncer.Update:
 		prevStatus := globalEgressIP.Status
 
@@ -151,66 +137,104 @@ func (c *globalEgressIPController) process(from runtime.Object, numRequeues int,
 
 func (c *globalEgressIPController) onCreateOrUpdate(key string, numberOfIPs int, globalEgressIP *submarinerv1.GlobalEgressIP,
 	numRequeues int) bool {
-	if numberOfIPs == len(globalEgressIP.Status.AllocatedIPs) {
-		klog.V(log.DEBUG).Infof("Update called for %q, but numberOfIPs %d are already allocated", key, numberOfIPs)
-		return false
+	namedIPSet := c.newNamedIPSet(key)
+
+	requeue := false
+	if numberOfIPs != len(globalEgressIP.Status.AllocatedIPs) {
+		requeue = c.flushGlobalEgressRules(key, namedIPSet.Name(), numRequeues, globalEgressIP)
 	}
 
-	c.releaseIPs(key, globalEgressIP.Status.AllocatedIPs...)
-
-	// All we need to do now in globalnet is allocate the IPs, start podWatcher in
-	// the gateway controller
-	return c.allocateGlobalIPs(key, numberOfIPs, globalEgressIP)
+	return requeue || c.processGlobalIPs(key, numberOfIPs, globalEgressIP, namedIPSet) ||
+		!c.createPodWatcher(key, namedIPSet, numberOfIPs, globalEgressIP)
 }
 
-func (c *globalEgressIPController) allocateGlobalIPs(key string, numberOfIPs int,
-	globalEgressIP *submarinerv1.GlobalEgressIP) bool {
-	klog.Infof("Allocating %d global IP(s) for %q", numberOfIPs, key)
-
-	if numberOfIPs == 0 {
-		globalEgressIP.Status.AllocatedIPs = nil
-		globalEgressIP.Status.Conditions = util.TryAppendCondition(globalEgressIP.Status.Conditions, &metav1.Condition{
-			Type:    string(submarinerv1.GlobalEgressIPAllocated),
-			Status:  metav1.ConditionFalse,
-			Reason:  "ZeroInput",
-			Message: "The specified NumberOfIPs is 0",
-		})
-
-		return false
+// nolint:wrapcheck  // No need to wrap these errors.
+func (c *globalEgressIPController) programGlobalEgressRules(key string, allocatedIPs []string, podSelector *metav1.LabelSelector,
+	namedIPSet ipset.Named) error {
+	err := namedIPSet.Create(true)
+	if err != nil {
+		return errors.Wrapf(err, "error creating the IP set chain %q", namedIPSet.Name())
 	}
+
+	snatIP := getTargetSNATIPaddress(allocatedIPs)
+	if podSelector != nil {
+		if err := c.ipt.AddEgressRulesForPods(key, namedIPSet.Name(), snatIP, globalNetIPTableMark); err != nil {
+			_ = c.ipt.RemoveEgressRulesForPods(key, namedIPSet.Name(), snatIP, globalNetIPTableMark)
+			return err
+		}
+	} else {
+		if err := c.ipt.AddEgressRulesForNamespace(key, namedIPSet.Name(), snatIP, globalNetIPTableMark); err != nil {
+			_ = c.ipt.RemoveEgressRulesForNamespace(key, namedIPSet.Name(), snatIP, globalNetIPTableMark)
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *globalEgressIPController) processGlobalIPs(key string, numberOfIPs int,
+	globalEgressIP *submarinerv1.GlobalEgressIP, namedIPSet ipset.Named) bool {
+	klog.Infof("Processing %d global IP(s) for %q", numberOfIPs, key)
+
+	// if numberOfIPs == 0 {
+	// 	globalEgressIP.Status.AllocatedIPs = nil
+	// 	globalEgressIP.Status.Conditions = util.TryAppendCondition(globalEgressIP.Status.Conditions, &metav1.Condition{
+	// 		Type:    string(submarinerv1.GlobalEgressIPAllocated),
+	// 		Status:  metav1.ConditionFalse,
+	// 		Reason:  "ZeroInput",
+	// 		Message: "The specified NumberOfIPs is 0",
+	// 	})
+
+	// 	return false
+	// }
 
 	if numberOfIPs == len(globalEgressIP.Status.AllocatedIPs) {
 		return false
 	}
 
-	globalEgressIP.Status.AllocatedIPs = nil
+	// allocatedIPs, err := c.pool.Allocate(numberOfIPs)
+	// if err != nil {
+	// 	klog.Errorf("Error allocating IPs for %q: %v", key, err)
 
-	allocatedIPs, err := c.pool.Allocate(numberOfIPs)
+	// 	globalEgressIP.Status.Conditions = util.TryAppendCondition(globalEgressIP.Status.Conditions, &metav1.Condition{
+	// 		Type:    string(submarinerv1.GlobalEgressIPAllocated),
+	// 		Status:  metav1.ConditionFalse,
+	// 		Reason:  "IPPoolAllocationFailed",
+	// 		Message: fmt.Sprintf("Error allocating %d global IP(s) from the pool: %v", numberOfIPs, err),
+	// 	})
+
+	// 	return true
+	// }
+
+	// On failure it will be the job of the globalnetcontroller to unallocate IPs, and other GWs to remove iptables
+	// rules if they see unallocation occuring
+	err := c.programGlobalEgressRules(key, globalEgressIP.Status.AllocatedIPs, globalEgressIP.Spec.PodSelector, namedIPSet)
 	if err != nil {
-		klog.Errorf("Error allocating IPs for %q: %v", key, err)
+		klog.Errorf("Error programming egress IP table rules for %q: %v", key, err)
 
 		globalEgressIP.Status.Conditions = util.TryAppendCondition(globalEgressIP.Status.Conditions, &metav1.Condition{
 			Type:    string(submarinerv1.GlobalEgressIPAllocated),
 			Status:  metav1.ConditionFalse,
-			Reason:  "IPPoolAllocationFailed",
-			Message: fmt.Sprintf("Error allocating %d global IP(s) from the pool: %v", numberOfIPs, err),
+			Reason:  "ProgramIPTableRulesFailed",
+			Message: fmt.Sprintf("Error programming egress rules: %v", err),
 		})
 
 		return true
 	}
 
-	metrics.RecordAllocateGlobalEgressIPs(c.pool.GetCIDR(), numberOfIPs)
+	nodeName, ok := os.LookupEnv("NODE_NAME")
+	if !ok {
+		klog.Error("error reading the NODE_NAME from the environment")
+	}
 
 	globalEgressIP.Status.Conditions = util.TryAppendCondition(globalEgressIP.Status.Conditions, &metav1.Condition{
 		Type:    string(submarinerv1.GlobalEgressIPAllocated),
-		Status:  metav1.ConditionFalse,
-		Reason:  "ProgramIPTablesRules Not Yet Occured",
-		Message: fmt.Sprintf("Allocated %d global IP(s)", numberOfIPs),
+		Status:  metav1.ConditionTrue,
+		Reason:  "Success",
+		Message: fmt.Sprintf("Processed %d global IP(s) for node: %s", numberOfIPs, nodeName),
 	})
 
-	globalEgressIP.Status.AllocatedIPs = allocatedIPs
-
-	klog.Infof("Allocated %v global IP(s) for %q", globalEgressIP.Status.AllocatedIPs, key)
+	klog.Infof("Processed %v global IP(s) for %q", globalEgressIP.Status.AllocatedIPs, key)
 
 	return false
 }
@@ -242,9 +266,22 @@ func (c *globalEgressIPController) onDelete(numRequeues int, globalEgressIP *sub
 		delete(c.podWatchers, key)
 	}
 
-	c.releaseIPs(key, globalEgressIP.Status.AllocatedIPs...)
+	namedIPSet := c.newNamedIPSet(key)
 
-	klog.Infof("Successfully released Allocated IPs %v for %q ", globalEgressIP.Status.AllocatedIPs, key)
+	requeue := c.flushGlobalEgressRules(key, namedIPSet.Name(), numRequeues, globalEgressIP)
+	if requeue {
+		return requeue
+	}
+
+	if err := namedIPSet.Destroy(); err != nil {
+		klog.Errorf("Error destroying the ipSet %q for %q: %v", namedIPSet.Name(), key, err)
+
+		if shouldRequeue(numRequeues) {
+			return true
+		}
+	}
+
+	klog.Infof("Successfully deleted all the iptables/ipset rules for %q ", key)
 
 	return false
 }
@@ -293,4 +330,24 @@ func (c *globalEgressIPController) createPodWatcher(key string, namedIPSet ipset
 	klog.Infof("Started pod watcher for %q", key)
 
 	return true
+}
+
+// nolint:wrapcheck  // No need to wrap these errors.
+func (c *globalEgressIPController) flushGlobalEgressRules(key, ipSetName string, numRequeues int,
+	globalEgressIP *submarinerv1.GlobalEgressIP) bool {
+	return flushRules(key, numRequeues, func(allocatedIPs []string) error {
+		if globalEgressIP.Spec.PodSelector != nil {
+			return c.ipt.RemoveEgressRulesForPods(key, ipSetName,
+				getTargetSNATIPaddress(allocatedIPs), globalNetIPTableMark)
+		}
+
+		return c.ipt.RemoveEgressRulesForNamespace(key, ipSetName, getTargetSNATIPaddress(allocatedIPs), globalNetIPTableMark)
+	}, globalEgressIP.Status.AllocatedIPs...)
+}
+
+func (c *globalEgressIPController) newNamedIPSet(key string) ipset.Named {
+	return ipset.NewNamed(&ipset.IPSet{
+		Name:    c.getIPSetName(key),
+		SetType: ipset.HashIP,
+	}, c.ipSetIface)
 }

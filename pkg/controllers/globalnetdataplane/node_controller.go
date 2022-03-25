@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package globalnetdataplane
 
 import (
 	"context"
@@ -27,6 +27,7 @@ import (
 	admUtil "github.com/submariner-io/admiral/pkg/util"
 	"github.com/submariner-io/submariner/pkg/globalnet/constants"
 	"github.com/submariner-io/submariner/pkg/ipam"
+	"github.com/submariner-io/submariner/pkg/iptables"
 	routeAgent "github.com/submariner-io/submariner/pkg/routeagent_driver/constants"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -40,12 +41,18 @@ func NewNodeController(config *syncer.ResourceSyncerConfig, pool *ipam.IPPool, n
 	// We'll panic if config is nil, this is intentional
 	var err error
 
-	klog.Info("Creating Node controller")
+	klog.Info("Creating Globalnet Node datapath controller")
 
 	controller := &nodeController{
-		baseIPAllocationController: newBaseIPAllocationController(pool),
-		nodeName:                   nodeName,
+		nodeName: nodeName,
 	}
+
+	iptIface, err := iptables.New()
+	if err != nil {
+		return nil, errors.Wrap(err, "error creating the IPTablesInterface handler")
+	}
+
+	controller.ipt = iptIface
 
 	federator := federate.NewUpdateFederator(config.SourceClient, config.RestMapper, corev1.NamespaceAll)
 	controller.resourceSyncer, err = syncer.NewResourceSyncer(&syncer.ResourceSyncerConfig{
@@ -104,6 +111,14 @@ func (n *nodeController) process(from runtime.Object, numRequeues int, op syncer
 
 	klog.Infof("Processing %sd Node %q", op, node.Name)
 
+	if err := n.iptIface.AddIngressRulesForHealthCheck(cniIfaceIP, globalIP); err != nil {
+		klog.Errorf("Error programming rules for Gateway healthcheck on node %q: %v", node.Name, err)
+
+		_ = n.pool.Release(globalIP)
+
+		return true
+	}
+
 	return n.allocateIP(node, op)
 }
 
@@ -134,6 +149,14 @@ func (n *nodeController) allocateIP(node *corev1.Node, op syncer.Operation) (run
 		klog.Infof("Allocated global IP %s for node %q", globalIP, node.Name)
 	}
 
+	klog.Infof("Adding ingress rules for node %q with global IP %s, CNI IP %s", node.Name, globalIP, cniIfaceIP)
+
+	if err := n.ipt.AddIngressRulesForHealthCheck(cniIfaceIP, globalIP); err != nil {
+		klog.Errorf("Error programming rules for Gateway healthcheck on node %q: %v", node.Name, err)
+
+		return nil, true
+	}
+
 	return n.updateNodeAnnotation(node, globalIP), false
 }
 
@@ -153,11 +176,9 @@ func (n *nodeController) reserveAllocatedIP(federator federate.Federator, obj *u
 		return nil
 	}
 
-	err := n.pool.Reserve(existingGlobalIP)
+	err := n.ipt.AddIngressRulesForHealthCheck(cniIfaceIP, existingGlobalIP)
 	if err != nil {
-		klog.Warningf("Could not reserve allocated GlobalIP for Node %q: %v", obj.GetName(), err)
-
-		return errors.Wrap(federator.Distribute(n.updateNodeAnnotation(obj, "")), "error updating the Node global IP annotation")
+		klog.Errorf("Could not Add Ingress Rules for HealthCheck for Node %q: %v", obj.GetName(), err)
 	}
 
 	return nil
@@ -194,8 +215,10 @@ func (n *nodeController) onNodeUpdated(oldObj, newObj *unstructured.Unstructured
 
 	globalIPCleared := oldGlobalIPOnNode != "" && newGlobalIPOnNode == ""
 	if globalIPCleared || oldCNIIfaceIPOnNode != newCNIIfaceIPOnNode {
-		if globalIPCleared {
-			_ = n.pool.Release(oldGlobalIPOnNode)
+		if oldCNIIfaceIPOnNode != "" && oldGlobalIPOnNode != "" {
+			if err := n.ipt.RemoveIngressRulesForHealthCheck(oldCNIIfaceIPOnNode, oldGlobalIPOnNode); err != nil {
+				klog.Errorf("Error deleting rules for Gateway healthcheck on node %q: %v", n.nodeName, err)
+			}
 		}
 
 		return false

@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package globalnetdataplane
 
 import (
 	"sync"
@@ -24,9 +24,9 @@ import (
 	"github.com/submariner-io/admiral/pkg/stringset"
 	"github.com/submariner-io/admiral/pkg/syncer"
 	"github.com/submariner-io/admiral/pkg/watcher"
-	"github.com/submariner-io/submariner/pkg/ipam"
 	"github.com/submariner-io/submariner/pkg/ipset"
 	"github.com/submariner-io/submariner/pkg/iptables"
+	iptiface "github.com/submariner-io/submariner/pkg/iptables"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
@@ -77,7 +77,9 @@ type Specification struct {
 	Uninstall  bool
 }
 
+// Every controller in the globalnetdataplane package will need the iptables interface
 type baseController struct {
+	ipt    iptables.Interface
 	stopCh chan struct{}
 }
 
@@ -86,7 +88,6 @@ type gatewayMonitor struct {
 	syncerConfig    *syncer.ResourceSyncerConfig
 	endpointWatcher watcher.Interface
 	spec            Specification
-	ipt             iptables.Interface
 	isGatewayNode   bool
 	nodeName        string
 	syncMutex       sync.Mutex
@@ -100,13 +101,8 @@ type baseSyncerController struct {
 	resourceSyncer syncer.Interface
 }
 
-type baseIPAllocationController struct {
-	*baseSyncerController
-	pool *ipam.IPPool
-}
-
 type globalEgressIPController struct {
-	*baseIPAllocationController
+	*baseSyncerController
 	sync.Mutex
 	podWatchers   map[string]*egressPodWatcher
 	ipSetIface    ipset.Interface
@@ -121,12 +117,12 @@ type egressPodWatcher struct {
 }
 
 type clusterGlobalEgressIPController struct {
-	*baseIPAllocationController
+	*baseSyncerController
 	localSubnets []string
 }
 
 type globalIngressIPController struct {
-	*baseIPAllocationController
+	*baseSyncerController
 	services dynamic.NamespaceableResourceInterface
 	scheme   *runtime.Scheme
 }
@@ -135,6 +131,7 @@ type serviceExportController struct {
 	*baseSyncerController
 	services             dynamic.NamespaceableResourceInterface
 	ingressIPs           dynamic.ResourceInterface
+	iptIface             iptiface.Interface
 	podControllers       *IngressPodControllers
 	endpointsControllers *ServiceExportEndpointsControllers
 	scheme               *runtime.Scheme
@@ -147,7 +144,7 @@ type serviceController struct {
 }
 
 type nodeController struct {
-	*baseIPAllocationController
+	*baseSyncerController
 	nodeName string
 	nodes    dynamic.ResourceInterface
 }
