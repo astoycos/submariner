@@ -20,8 +20,6 @@ package controllers
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base32"
 	"fmt"
 
 	"github.com/pkg/errors"
@@ -33,14 +31,11 @@ import (
 	submarinerv1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
 	"github.com/submariner-io/submariner/pkg/globalnet/metrics"
 	"github.com/submariner-io/submariner/pkg/ipam"
-	"github.com/submariner-io/submariner/pkg/ipset"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog"
-	utilexec "k8s.io/utils/exec"
 )
 
 func NewGlobalEgressIPController(config *syncer.ResourceSyncerConfig, pool *ipam.IPPool) (Interface, error) {
@@ -58,8 +53,6 @@ func NewGlobalEgressIPController(config *syncer.ResourceSyncerConfig, pool *ipam
 			Scheme:     config.Scheme,
 		},
 	}
-
-	controller.ipSetIface = ipset.New(utilexec.New())
 
 	_, gvr, err := util.ToUnstructuredResource(&submarinerv1.GlobalEgressIP{}, config.RestMapper)
 	if err != nil {
@@ -247,50 +240,4 @@ func (c *globalEgressIPController) onDelete(numRequeues int, globalEgressIP *sub
 	klog.Infof("Successfully released Allocated IPs %v for %q ", globalEgressIP.Status.AllocatedIPs, key)
 
 	return false
-}
-
-func (c *globalEgressIPController) getIPSetName(key string) string {
-	hash := sha256.Sum256([]byte(key))
-	encoded := base32.StdEncoding.EncodeToString(hash[:])
-	// Max length of IPSet name can be 31
-	return IPSetPrefix + encoded[:25]
-}
-
-func (c *globalEgressIPController) createPodWatcher(key string, namedIPSet ipset.Named, numberOfIPs int,
-	globalEgressIP *submarinerv1.GlobalEgressIP) bool {
-	c.Lock()
-	defer c.Unlock()
-
-	prevPodWatcher, found := c.podWatchers[key]
-	if found {
-		if !equality.Semantic.DeepEqual(prevPodWatcher.podSelector, globalEgressIP.Spec.PodSelector) {
-			klog.Errorf("PodSelector for %q cannot be updated after creation", key)
-
-			globalEgressIP.Status.Conditions = util.TryAppendCondition(globalEgressIP.Status.Conditions, &metav1.Condition{
-				Type:    string(submarinerv1.GlobalEgressIPUpdated),
-				Status:  metav1.ConditionFalse,
-				Reason:  "PodSelectorUpdateNotSupported",
-				Message: "The PodSelector cannot be updated after creation",
-			})
-		}
-
-		return true
-	}
-
-	if numberOfIPs == 0 {
-		return true
-	}
-
-	podWatcher, err := startEgressPodWatcher(key, globalEgressIP.Namespace, namedIPSet, &c.watcherConfig, globalEgressIP.Spec.PodSelector)
-	if err != nil {
-		klog.Errorf("Error starting pod watcher for %q: %v", key, err)
-		return false
-	}
-
-	c.podWatchers[key] = podWatcher
-	podWatcher.podSelector = globalEgressIP.Spec.PodSelector
-
-	klog.Infof("Started pod watcher for %q", key)
-
-	return true
 }

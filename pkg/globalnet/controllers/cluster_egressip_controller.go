@@ -21,6 +21,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/submariner-io/admiral/pkg/federate"
@@ -53,42 +54,30 @@ func NewClusterGlobalEgressIPController(config *syncer.ResourceSyncerConfig, loc
 
 	federator := federate.NewUpdateFederator(config.SourceClient, config.RestMapper, corev1.NamespaceAll)
 
-	numberOfIPs := DefaultNumberOfClusterEgressIPs
-	defaultEgressIP := &submarinerv1.ClusterGlobalEgressIP{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: constants.ClusterGlobalEgressIPName,
-		},
-		Spec: submarinerv1.ClusterGlobalEgressIPSpec{
-			NumberOfIPs: &numberOfIPs,
-		},
-	}
-
-	defaultEgressIPObj, gvr, err := util.ToUnstructuredResource(defaultEgressIP, config.RestMapper)
+	_, gvr, err := util.ToUnstructuredResource(&submarinerv1.ClusterGlobalEgressIP{}, config.RestMapper)
 	if err != nil {
 		return nil, errors.Wrap(err, "error converting resource")
 	}
 
 	client := config.SourceClient.Resource(*gvr)
 
-	obj, err := client.Get(context.TODO(), defaultEgressIP.Name, metav1.GetOptions{})
+	objs, err := client.List(context.TODO(), metav1.ListOptions{})
 	if apierrors.IsNotFound(err) {
-		klog.Infof("Creating ClusterGlobalEgressIP resource %q", defaultEgressIP.Name)
-
-		_, err = client.Create(context.TODO(), defaultEgressIPObj, metav1.CreateOptions{})
-		if err != nil {
-			return nil, errors.Wrapf(err, "error creating ClusterGlobalEgressIP resource %q", defaultEgressIP.Name)
-		}
+		klog.Info("No ClusterGlobalEgressIP resources Found")
 	} else if err != nil {
-		return nil, errors.Wrapf(err, "error retrieving ClusterGlobalEgressIP resource %q", defaultEgressIP.Name)
+		return nil, errors.Wrap(err, "error retrieving ClusterGlobalEgressIP resources")
 	}
 
-	if obj != nil {
-		err := controller.reserveAllocatedIPs(federator, obj, func(reservedIPs []string) error {
-			metrics.RecordAllocateClusterGlobalEgressIPs(pool.GetCIDR(), len(reservedIPs))
-			return nil
-		})
-		if err != nil {
-			return nil, err
+	// Preallocate existing objects if there are any
+	if len(objs.Items) != 0 {
+		for _, obj := range objs.Items {
+			err := controller.reserveAllocatedIPs(federator, &obj, func(reservedIPs []string) error {
+				metrics.RecordAllocateClusterGlobalEgressIPs(pool.GetCIDR(), len(reservedIPs))
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -132,9 +121,9 @@ func (c *clusterGlobalEgressIPController) process(from runtime.Object, numRequeu
 			return checkStatusChanged(&prevStatus, &clusterGlobalEgressIP.Status, clusterGlobalEgressIP), false
 		}
 
-		requeue := c.onCreateOrUpdate(key, numberOfIPs, &clusterGlobalEgressIP.Status, numRequeues)
+		c.onCreateOrUpdate(key, numberOfIPs, &clusterGlobalEgressIP.Status, numRequeues)
 
-		return checkStatusChanged(&prevStatus, &clusterGlobalEgressIP.Status, clusterGlobalEgressIP), requeue
+		return checkStatusChanged(&prevStatus, &clusterGlobalEgressIP.Status, clusterGlobalEgressIP), false
 	case syncer.Delete:
 		c.releaseIPs(key, clusterGlobalEgressIP.Status.AllocatedIPs...)
 		return nil, false
@@ -144,7 +133,7 @@ func (c *clusterGlobalEgressIPController) process(from runtime.Object, numRequeu
 }
 
 func (c *clusterGlobalEgressIPController) validate(numberOfIPs int, egressIP *submarinerv1.ClusterGlobalEgressIP) bool {
-	if egressIP.Name != constants.ClusterGlobalEgressIPName {
+	if !strings.Contains(egressIP.Name, constants.ClusterGlobalEgressIPName) {
 		egressIP.Status.Conditions = util.TryAppendCondition(egressIP.Status.Conditions, &metav1.Condition{
 			Type:   string(submarinerv1.GlobalEgressIPAllocated),
 			Status: metav1.ConditionFalse,
@@ -191,10 +180,6 @@ func (c *clusterGlobalEgressIPController) onCreateOrUpdate(key string, numberOfI
 	return c.allocateGlobalIPs(key, numberOfIPs, status)
 }
 
-func (c *clusterGlobalEgressIPController) onDelete(key string, status *submarinerv1.GlobalEgressIPStatus, numRequeues int) {
-	c.releaseIPs(key, status.AllocatedIPs...)
-}
-
 func (c *clusterGlobalEgressIPController) allocateGlobalIPs(key string, numberOfIPs int, status *submarinerv1.GlobalEgressIPStatus) bool {
 	klog.Infof("Allocating %d global IP(s) for %q", numberOfIPs, key)
 
@@ -224,7 +209,7 @@ func (c *clusterGlobalEgressIPController) allocateGlobalIPs(key string, numberOf
 	status.Conditions = util.TryAppendCondition(status.Conditions, &metav1.Condition{
 		Type:    string(submarinerv1.GlobalEgressIPAllocated),
 		Status:  metav1.ConditionFalse,
-		Reason:  "ProgramIPTablesRules Not Yet Occured",
+		Reason:  "NoDatapathRules",
 		Message: fmt.Sprintf("Allocated %d global IP(s)", numberOfIPs),
 	})
 

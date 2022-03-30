@@ -87,8 +87,6 @@ type gatewayMonitor struct {
 	endpointWatcher watcher.Interface
 	spec            Specification
 	ipt             iptables.Interface
-	isGatewayNode   bool
-	nodeName        string
 	syncMutex       sync.Mutex
 	localSubnets    []string
 	remoteSubnets   stringset.Interface
@@ -148,8 +146,7 @@ type serviceController struct {
 
 type nodeController struct {
 	*baseIPAllocationController
-	nodeName string
-	nodes    dynamic.ResourceInterface
+	nodes dynamic.ResourceInterface
 }
 
 type ingressPodController struct {
