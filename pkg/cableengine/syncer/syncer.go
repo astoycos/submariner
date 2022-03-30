@@ -165,14 +165,16 @@ func (gs *GatewaySyncer) cleanupStaleGatewayEntries(localGatewayName string) err
 		}
 
 		if stale {
-			err := gs.client.Delete(context.TODO(), gw.Name, metav1.DeleteOptions{})
-			if err != nil {
-				// In this case we don't want to stop the cleanup loop and just log it.
-				utilruntime.HandleError(fmt.Errorf("error deleting stale Gateway %+v: %w", gw, err))
-			} else {
-				klog.Warningf("Deleted stale gateway: %s, didn't report for %s",
-					gw.Name, GatewayStaleTimeout)
-			}
+			klog.Warningf("Would stale gateway: %s, didn't report for %s", gw.Name, GatewayStaleTimeout)
+
+			// err := gs.client.Delete(context.TODO(), gw.Name, metav1.DeleteOptions{})
+			// if err != nil {
+			// 	// In this case we don't want to stop the cleanup loop and just log it.
+			// 	utilruntime.HandleError(fmt.Errorf("error deleting stale Gateway %+v: %w", gw, err))
+			// } else {
+			// 	klog.Warningf("Deleted stale gateway: %s, didn't report for %s",
+			// 		gw.Name, GatewayStaleTimeout)
+			// }
 		}
 	}
 

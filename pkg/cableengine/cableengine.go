@@ -164,11 +164,12 @@ func (i *engine) installCableWithNATInfo(rnat *natdiscovery.NATEndpointInfo) err
 		klog.V(log.TRACE).Infof("Found a pre-existing cable %q with timestamp %q that belongs to this cluster %s",
 			active.Endpoint.CableName, prevTimestamp, endpoint.Spec.ClusterID)
 
-		if endpoint.CreationTimestamp.Before(&prevTimestamp) {
-			klog.Warningf("The timestamp (%s) for new cable %q is older than the timestamp (%s) of the pre-existing "+
-				"cable %q - not replacing", endpoint.CreationTimestamp, endpoint.Spec.CableName, prevTimestamp, active.Endpoint.CableName)
-			return nil
-		}
+		// TODO (astoycos) Remove this once everything is working correctly
+		// if endpoint.CreationTimestamp.Before(&prevTimestamp) && !i.multiActiveGateways {
+		// 	klog.Warningf("The timestamp (%s) for new cable %q is older than the timestamp (%s) of the pre-existing "+
+		// 		"cable %q - not replacing", endpoint.CreationTimestamp, endpoint.Spec.CableName, prevTimestamp, active.Endpoint.CableName)
+		// 	return nil
+		// }
 
 		if endpoint.CreationTimestamp.Equal(&prevTimestamp) && active.Endpoint.CableName == endpoint.Spec.CableName {
 			// There could be scenarios where the cableName would be the same but the endpoint IP or specific driver
