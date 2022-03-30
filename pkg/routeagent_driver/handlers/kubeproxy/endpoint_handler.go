@@ -93,13 +93,13 @@ func (kp *SyncHandler) RemoteEndpointCreated(endpoint *submV1.Endpoint) error {
 	kp.syncHandlerMutex.Lock()
 	defer kp.syncHandlerMutex.Unlock()
 
-	lastProcessedTime, ok := kp.remoteEndpointTimeStamp[endpoint.Spec.ClusterID]
+	//lastProcessedTime, ok := kp.remoteEndpointTimeStamp[endpoint.Spec.ClusterID]
 
-	if ok && lastProcessedTime.After(endpoint.CreationTimestamp.Time) {
-		klog.Infof("Ignoring new remote %#v since a later endpoint was already"+
-			"processed", endpoint)
-		return nil
-	}
+	// if ok && lastProcessedTime.After(endpoint.CreationTimestamp.Time) {
+	// 	klog.Infof("Ignoring new remote %#v since a later endpoint was already"+
+	// 		"processed", endpoint)
+	// 	return nil
+	// }
 
 	for _, inputCidrBlock := range endpoint.Spec.Subnets {
 		if !kp.remoteSubnets.Contains(inputCidrBlock) {
@@ -110,9 +110,13 @@ func (kp *SyncHandler) RemoteEndpointCreated(endpoint *submV1.Endpoint) error {
 		kp.remoteSubnetGw[inputCidrBlock] = gwIP
 	}
 
-	err := kp.reconcileIntraClusterRoutes()
-	if err != nil {
-		return errors.Wrap(err, "error while reconciling routes")
+	// we will reconcile correctly on local endpoint creation if the vx-submariner
+	// device has not been created
+	if kp.vxlanDevice != nil {
+		err := kp.reconcileIntraClusterRoutes()
+		if err != nil {
+			return errors.Wrap(err, "error while reconciling routes")
+		}
 	}
 
 	// Add routes to the new endpoint on the GatewayNode.

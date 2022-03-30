@@ -38,10 +38,7 @@ func (kp *SyncHandler) TransitionToNonGateway() error {
 	}
 	kp.gwIPs.Remove(ipAddr.String())
 
-	err = kp.reconcileIntraClusterRoutes()
-	if err != nil {
-		return errors.Wrap(err, "error while reconciling routes")
-	} // If the active Gateway transitions to a new node, we flush the HostNetwork routing table.
+	// If the active Gateway transitions to a new node, we flush the HostNetwork routing table.
 	kp.updateRoutingRulesForHostNetworkSupport(nil, Flush)
 
 	err = kp.configureIPRule(Delete)
@@ -55,6 +52,11 @@ func (kp *SyncHandler) TransitionToNonGateway() error {
 	err = kp.updateVxLANInterface()
 	if err != nil {
 		klog.Fatalf("Unable to create VxLAN interface on gateway node (%s): %v", kp.hostname, err)
+	}
+
+	err = kp.reconcileIntraClusterRoutes()
+	if err != nil {
+		return errors.Wrap(err, "error while reconciling routes")
 	}
 
 	return nil
