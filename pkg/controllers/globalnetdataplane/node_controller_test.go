@@ -26,8 +26,8 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/submariner-io/admiral/pkg/syncer"
 	"github.com/submariner-io/admiral/pkg/syncer/test"
+	"github.com/submariner-io/submariner/pkg/controllers/globalnetdataplane"
 	"github.com/submariner-io/submariner/pkg/globalnet/constants"
-	"github.com/submariner-io/submariner/pkg/globalnet/controllers"
 	"github.com/submariner-io/submariner/pkg/ipam"
 	routeAgent "github.com/submariner-io/submariner/pkg/routeagent_driver/constants"
 	corev1 "k8s.io/api/core/v1"
@@ -194,11 +194,11 @@ func newNodeControllerTestDriver() *nodeControllerTestDriver {
 func (t *nodeControllerTestDriver) start() {
 	var err error
 
-	t.controller, err = controllers.NewNodeController(&syncer.ResourceSyncerConfig{
+	t.controller, err = globalnetdataplane.NewNodeController(&syncer.ResourceSyncerConfig{
 		SourceClient: t.dynClient,
 		RestMapper:   t.restMapper,
 		Scheme:       t.scheme,
-	}, t.pool, nodeName)
+	}, nodeName)
 
 	Expect(err).To(Succeed())
 	Expect(t.controller.Start()).To(Succeed())

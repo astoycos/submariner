@@ -20,7 +20,6 @@ package globalnetdataplane
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/pkg/errors"
 	"github.com/submariner-io/admiral/pkg/federate"
@@ -28,7 +27,6 @@ import (
 	"github.com/submariner-io/admiral/pkg/syncer"
 	"github.com/submariner-io/admiral/pkg/util"
 	submarinerv1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
-	"github.com/submariner-io/submariner/pkg/ipam"
 	"github.com/submariner-io/submariner/pkg/iptables"
 
 	corev1 "k8s.io/api/core/v1"
@@ -38,8 +36,7 @@ import (
 	"k8s.io/klog"
 )
 
-func NewClusterGlobalEgressIPController(config *syncer.ResourceSyncerConfig, localSubnets []string,
-	pool *ipam.IPPool) (Interface, error) {
+func NewClusterGlobalEgressIPController(config *syncer.ResourceSyncerConfig, localSubnets []string) (Interface, error) {
 	// We'll panic if config is nil, this is intentional
 	var err error
 
@@ -55,7 +52,7 @@ func NewClusterGlobalEgressIPController(config *syncer.ResourceSyncerConfig, loc
 		return nil, errors.WithMessage(err, "error creating the IPTablesInterface handler")
 	}
 
-	controller.ipt = iptIface
+	controller.baseController.ipt = iptIface
 
 	federator := federate.NewUpdateFederator(config.SourceClient, config.RestMapper, corev1.NamespaceAll)
 
@@ -69,6 +66,7 @@ func NewClusterGlobalEgressIPController(config *syncer.ResourceSyncerConfig, loc
 		Scheme:              config.Scheme,
 		Transform:           controller.process,
 		ResourcesEquivalent: syncer.AreSpecsEquivalent,
+		ShouldProcess:       shouldProcessClusterGlobalEgressIP,
 	})
 
 	if err != nil {
@@ -113,7 +111,7 @@ func (c *clusterGlobalEgressIPController) onCreateOrUpdate(key string, numberOfI
 		return false
 	}
 
-	if requeue := flushRules(key, numRequeues, c.flushClusterGlobalEgressRules,
+	if requeue := FlushAllocatedIPRules(key, numRequeues, c.flushClusterGlobalEgressRules,
 		status.AllocatedIPs...); requeue {
 		return true
 	}
@@ -135,15 +133,10 @@ func (c *clusterGlobalEgressIPController) onCreateOrUpdate(key string, numberOfI
 		return true
 	}
 
-	nodeName, ok := os.LookupEnv("NODE_NAME")
-	if !ok {
-		klog.Errorf("error reading the NODE_NAME from the environment")
-	}
-
 	status.Conditions = util.TryAppendCondition(status.Conditions, &metav1.Condition{
 		Type:    string(submarinerv1.GlobalEgressIPAllocated),
 		Status:  metav1.ConditionTrue,
-		Reason:  fmt.Sprintf("Datapath Success on node:  %s", nodeName),
+		Reason:  "DatapathRuleWriteSuccess",
 		Message: fmt.Sprintf("Allocated %d global IP(s)", numberOfIPs),
 	})
 
@@ -151,7 +144,7 @@ func (c *clusterGlobalEgressIPController) onCreateOrUpdate(key string, numberOfI
 }
 
 func (c *clusterGlobalEgressIPController) onDelete(key string, status *submarinerv1.GlobalEgressIPStatus, numRequeues int) bool {
-	return flushRules(key, numRequeues, c.flushClusterGlobalEgressRules,
+	return FlushAllocatedIPRules(key, numRequeues, c.flushClusterGlobalEgressRules,
 		status.AllocatedIPs...)
 }
 

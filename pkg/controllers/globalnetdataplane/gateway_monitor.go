@@ -32,7 +32,6 @@ import (
 	v1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
 	"github.com/submariner-io/submariner/pkg/cidr"
 	"github.com/submariner-io/submariner/pkg/globalnet/constants"
-	"github.com/submariner-io/submariner/pkg/ipam"
 	"github.com/submariner-io/submariner/pkg/iptables"
 	"github.com/submariner-io/submariner/pkg/netlink"
 	routeAgent "github.com/submariner-io/submariner/pkg/routeagent_driver/constants"
@@ -43,14 +42,15 @@ import (
 	"k8s.io/klog"
 )
 
+// This Gateway Monitor runs on every GW node when Globalnet is
 func NewGatewayMonitor(spec Specification, localCIDRs []string, config *watcher.Config) (Interface, error) {
 	// We'll panic if config is nil, this is intentional
 	gatewayMonitor := &gatewayMonitor{
 		baseController: newBaseController(),
 		spec:           spec,
-		isGatewayNode:  false,
 		localSubnets:   stringset.New(localCIDRs...).Elements(),
 		remoteSubnets:  stringset.NewSynchronized(),
+		isGatewayNode:  false,
 	}
 
 	var err error
@@ -78,7 +78,7 @@ func NewGatewayMonitor(spec Specification, localCIDRs []string, config *watcher.
 
 	config.ResourceConfigs = []watcher.ResourceConfig{
 		{
-			Name:         "IPAM GatewayMonitor",
+			Name:         "GlobalnetDataplane GatewayMonitor",
 			ResourceType: &v1.Endpoint{},
 			Handler: watcher.EventHandlerFuncs{
 				OnCreateFunc: gatewayMonitor.handleCreatedOrUpdatedEndpoint,
@@ -121,9 +121,28 @@ func (g *gatewayMonitor) Start() error {
 		return errors.Wrap(err, "error starting the Endpoint watcher")
 	}
 
+	// Clear any existing stale data
+	g.clearGlobalnetChains()
+
 	if err := g.createGlobalNetMarkingChain(); err != nil {
 		return errors.Wrap(err, "error while calling createGlobalNetMarkingChain")
 	}
+
+	// We're on a GW node so go ahead and start all controllers
+	klog.V(log.DEBUG).Info("On GW node starting all globalnet Datapath controllers")
+
+	configureTCPMTUProbe()
+
+	g.syncMutex.Lock()
+	if !g.isGatewayNode {
+		g.isGatewayNode = true
+
+		err := g.startControllers()
+		if err != nil {
+			klog.Fatalf("Error starting the controllers: %v", err)
+		}
+	}
+	g.syncMutex.Unlock()
 
 	return nil
 }
@@ -170,32 +189,27 @@ func (g *gatewayMonitor) handleCreatedOrUpdatedEndpoint(obj runtime.Object, numR
 		return false
 	}
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		klog.Fatalf("Unable to determine hostname: %v", err)
-	}
-
 	for _, remoteSubnet := range g.remoteSubnets.Elements() {
 		g.markRemoteClusterTraffic(remoteSubnet, AddRules)
 	}
 
 	// If the endpoint hostname matches with our hostname, it implies we are on gateway node
-	if endpoint.Spec.Hostname == hostname {
-		klog.V(log.DEBUG).Infof("Transitioned to gateway node with endpoint private IP %s", endpoint.Spec.PrivateIP)
+	// if endpoint.Spec.Hostname == hostname {
+	// 	klog.V(log.DEBUG).Infof("Transitioned to gateway node with endpoint private IP %s", endpoint.Spec.PrivateIP)
 
-		configureTCPMTUProbe()
+	// 	configureTCPMTUProbe()
 
-		g.syncMutex.Lock()
-		if !g.isGatewayNode {
-			g.isGatewayNode = true
+	// 	g.syncMutex.Lock()
+	// 	if !g.isGatewayNode {
+	// 		g.isGatewayNode = true
 
-			err := g.startControllers()
-			if err != nil {
-				klog.Fatalf("Error starting the controllers: %v", err)
-			}
-		}
-		g.syncMutex.Unlock()
-	}
+	// 		err := g.startControllers()
+	// 		if err != nil {
+	// 			klog.Fatalf("Error starting the controllers: %v", err)
+	// 		}
+	// 	}
+	// 	g.syncMutex.Unlock()
+	// }
 	// Only stop controllers on endpoint deletion since we can have multiple gateways
 	// else {
 	// 	klog.V(log.DEBUG).Infof("Transitioned to non-gateway node with endpoint private IP %s", endpoint.Spec.PrivateIP)
@@ -211,6 +225,7 @@ func (g *gatewayMonitor) handleCreatedOrUpdatedEndpoint(obj runtime.Object, numR
 	return false
 }
 
+// TODO(astoyocs) Add the correct cleanup logic for deleting connections
 func (g *gatewayMonitor) handleRemovedEndpoint(obj runtime.Object, numRequeues int) bool {
 	endpoint := obj.(*v1.Endpoint)
 
@@ -239,74 +254,71 @@ func (g *gatewayMonitor) handleRemovedEndpoint(obj runtime.Object, numRequeues i
 	return false
 }
 
+// TODO(astoycos) re-implement the rest of the controllers
 func (g *gatewayMonitor) startControllers() error {
-	klog.Infof("On Gateway node - starting controllers")
+	klog.Infof("On Gateway node - starting globalnet controllers")
 
 	err := g.createGlobalnetChains()
 	if err != nil {
 		return err
 	}
 
-	pool, err := ipam.NewIPPool(g.spec.GlobalCIDR[0])
-	if err != nil {
-		return errors.Wrap(err, "error creating the IP pool")
-	}
-
 	g.controllers = nil
 
-	c, err := NewNodeController(g.syncerConfig, pool, g.nodeName)
+	// This needs to watch only the Local node object and make datapath changes accordingly
+	c, err := NewNodeController(g.syncerConfig, g.nodeName)
 	if err != nil {
 		return errors.Wrap(err, "error creating the Node controller")
 	}
 
 	g.controllers = append(g.controllers, c)
 
-	c, err = NewClusterGlobalEgressIPController(g.syncerConfig, g.localSubnets, pool)
+	c, err = NewClusterGlobalEgressIPController(g.syncerConfig, g.localSubnets)
 	if err != nil {
 		return errors.Wrap(err, "error creating the ClusterGlobalEgressIP controller")
 	}
 
 	g.controllers = append(g.controllers, c)
 
-	c, err = NewGlobalEgressIPController(g.syncerConfig, pool)
-	if err != nil {
-		return errors.Wrap(err, "error creating the GlobalEgressIP controller")
-	}
+	// c, err = NewGlobalEgressIPController(g.syncerConfig, pool)
+	// if err != nil {
+	// 	return errors.Wrap(err, "error creating the GlobalEgressIP controller")
+	// }
 
-	g.controllers = append(g.controllers, c)
+	// g.controllers = append(g.controllers, c)
 
 	// The GlobalIngressIP controller needs to be started before the ServiceExport and Service controllers to ensure
 	// reconciliation works properly.
-	c, err = NewGlobalIngressIPController(g.syncerConfig, pool)
-	if err != nil {
-		return errors.Wrap(err, "error creating the GlobalIngressIP controller")
-	}
+	// c, err = NewGlobalIngressIPController(g.syncerConfig, pool)
+	// if err != nil {
+	// 	return errors.Wrap(err, "error creating the GlobalIngressIP controller")
+	// }
 
-	g.controllers = append(g.controllers, c)
+	// g.controllers = append(g.controllers, c)
 
-	podControllers, err := NewIngressPodControllers(g.syncerConfig)
-	if err != nil {
-		return errors.Wrap(err, "error creating the IngressPodControllers")
-	}
+	// podControllers, err := NewIngressPodControllers(g.syncerConfig)
+	// if err != nil {
+	// 	return errors.Wrap(err, "error creating the IngressPodControllers")
+	// }
 
-	endpointsControllers, err := NewServiceExportEndpointsControllers(g.syncerConfig)
-	if err != nil {
-		return errors.Wrap(err, "error creating the Endpoints controller")
-	}
+	// endpointsControllers, err := NewServiceExportEndpointsControllers(g.syncerConfig)
+	// if err != nil {
+	// 	return errors.Wrap(err, "error creating the Endpoints controller")
+	// }
 
-	c, err = NewServiceExportController(g.syncerConfig, podControllers, endpointsControllers)
-	if err != nil {
-		return errors.Wrap(err, "error creating the ServiceExport controller")
-	}
+	// c, err = NewServiceExportController(g.syncerConfig, podControllers, endpointsControllers)
+	// if err != nil {
+	// 	return errors.Wrap(err, "error creating the ServiceExport controller")
+	// }
 
-	g.controllers = append(g.controllers, c)
+	// g.controllers = append(g.controllers, c)
 
-	c, err = NewServiceController(g.syncerConfig, podControllers)
-	if err != nil {
-		return errors.Wrap(err, "error creating the Service controller")
-	}
+	// c, err = NewServiceController(g.syncerConfig, podControllers)
+	// if err != nil {
+	// 	return errors.Wrap(err, "error creating the Service controller")
+	// }
 
-	g.controllers = append(g.controllers, c)
+	// g.controllers = append(g.controllers, c)
 
 	for _, c := range g.controllers {
 		err = c.Start()
@@ -326,7 +338,7 @@ func (g *gatewayMonitor) stopControllers() {
 	}
 
 	g.controllers = nil
-
+	klog.Info("Active gateway migrated, flushing Globalnet chains.")
 	g.clearGlobalnetChains()
 }
 
@@ -428,8 +440,6 @@ func (g *gatewayMonitor) createGlobalnetChains() error {
 }
 
 func (g *gatewayMonitor) clearGlobalnetChains() {
-	klog.Info("Active gateway migrated, flushing Globalnet chains.")
-
 	if err := g.ipt.ClearChain("nat", constants.SmGlobalnetIngressChain); err != nil {
 		klog.Errorf("Error while flushing rules in %s chain: %v", constants.SmGlobalnetIngressChain, err)
 	}

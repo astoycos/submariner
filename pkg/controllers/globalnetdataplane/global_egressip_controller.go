@@ -335,7 +335,7 @@ func (c *globalEgressIPController) createPodWatcher(key string, namedIPSet ipset
 // nolint:wrapcheck  // No need to wrap these errors.
 func (c *globalEgressIPController) flushGlobalEgressRules(key, ipSetName string, numRequeues int,
 	globalEgressIP *submarinerv1.GlobalEgressIP) bool {
-	return flushRules(key, numRequeues, func(allocatedIPs []string) error {
+	return FlushAllocatedIPRules(key, numRequeues, func(allocatedIPs []string) error {
 		if globalEgressIP.Spec.PodSelector != nil {
 			return c.ipt.RemoveEgressRulesForPods(key, ipSetName,
 				getTargetSNATIPaddress(allocatedIPs), globalNetIPTableMark)

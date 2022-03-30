@@ -20,6 +20,7 @@ package globalnetdataplane
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/pkg/errors"
 	"github.com/submariner-io/admiral/pkg/federate"
@@ -62,7 +63,7 @@ func NewGlobalIngressIPController(config *syncer.ResourceSyncerConfig, pool *ipa
 	controller.ipt = iptIface
 
 	// We do need all these bits since if a new GW is created we need to sync on pre-existing objects.
-	// However care should be take here to only sync on GlobalIngressIP items that have already
+	// However care should be taken here to only sync on GlobalIngressIP items that have already
 	// been allocated
 
 	_, gvr, err = util.ToUnstructuredResource(&submarinerv1.GlobalIngressIP{}, config.RestMapper)
@@ -241,7 +242,7 @@ func (c *globalIngressIPController) onDelete(ingressIP *submarinerv1.GlobalIngre
 		return false
 	}
 
-	return flushRules(key, numRequeues, func(allocatedIPs []string) error {
+	return FlushAllocatedIPRules(key, numRequeues, func(allocatedIPs []string) error {
 		if ingressIP.Spec.Target == submarinerv1.HeadlessServicePod {
 			podIP := ingressIP.GetAnnotations()[headlessSvcPodIP]
 			if podIP != "" {
@@ -255,4 +256,31 @@ func (c *globalIngressIPController) onDelete(ingressIP *submarinerv1.GlobalIngre
 
 		return nil
 	}, ingressIP.Status.AllocatedIP)
+}
+
+func (c *globalIngressIPController) ensureInternalServiceExists(ingressIP *submarinerv1.GlobalIngressIP) error {
+	serviceRef := ingressIP.Spec.ServiceRef
+	internalSvc := GetInternalSvcName(serviceRef.Name)
+	key := fmt.Sprintf("%s/%s", ingressIP.Namespace, internalSvc)
+
+	service, exists, err := getService(internalSvc, ingressIP.Namespace, c.services, c.scheme)
+	if err != nil || !exists {
+		return fmt.Errorf("internal service created by Globalnet controller %q does not exist", key)
+	}
+
+	if len(service.Spec.ExternalIPs) == 0 || service.Spec.ExternalIPs[0] != ingressIP.Status.AllocatedIP {
+		// A user is ideally not supposed to modify the external-ip of the Globalnet internal service, but
+		// in-case its done accidentally, as part of controller start/re-start scenario, this code will fix
+		// the issue by deleting and re-creating the internal service with valid configuration.
+		if err := finalizer.Remove(context.TODO(), resource.ForDynamic(c.services.Namespace(ingressIP.Namespace)), service,
+			InternalServiceFinalizer); err != nil {
+			return fmt.Errorf("error while removing the finalizer from globalnet internal service %q", key)
+		}
+
+		_ = deleteService(ingressIP.Namespace, internalSvc, c.services)
+
+		return fmt.Errorf("globalIP assigned to %q does not match with Internal Service ExternalIP", key)
+	}
+
+	return nil
 }

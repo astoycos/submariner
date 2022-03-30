@@ -23,10 +23,13 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/pkg/errors"
 	resourceUtil "github.com/submariner-io/admiral/pkg/resource"
+	"github.com/submariner-io/admiral/pkg/syncer"
+	"github.com/submariner-io/submariner/pkg/globalnet/constants"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -81,13 +84,13 @@ func (c *baseSyncerController) reconcile(client dynamic.ResourceInterface, label
 	})
 }
 
-func flushRules(key string, numRequeues int, flushRules func(allocatedIPs []string) error,
+func FlushAllocatedIPRules(key string, numRequeues int, flushRules func(allocatedIPs []string) error,
 	allocatedIPs ...string) bool {
 	if len(allocatedIPs) == 0 {
 		return false
 	}
 
-	klog.Infof("Flusing Iptables rules for previously allocated IPs %v for %q", allocatedIPs, key)
+	klog.Infof("Flushing Iptables rules for previously allocated IPs %v for %q", allocatedIPs, key)
 
 	err := flushRules(allocatedIPs)
 	if err != nil {
@@ -209,4 +212,21 @@ func getAllocatedIPs(obj *unstructured.Unstructured) []string {
 	}
 
 	return reservedIPs
+}
+
+// We only want to process the object if the object coresponds to the gateway's node
+func shouldProcessClusterGlobalEgressIP(obj *unstructured.Unstructured, op syncer.Operation) bool {
+	nodeName, ok := os.LookupEnv("NODE_NAME")
+	if !ok {
+		klog.Error("error reading the NODE_NAME from the environment")
+		return false
+	}
+
+	name, ok, _ := unstructured.NestedString(obj.Object, "metadata", "name")
+	if !ok {
+		klog.Error("Cannot pull name from clusterglobalegressIP object")
+		return false
+	}
+
+	return nodeName == strings.TrimSuffix(name, "-"+constants.ClusterGlobalEgressIPName)
 }
