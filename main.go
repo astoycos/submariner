@@ -42,6 +42,7 @@ import (
 	"github.com/submariner-io/submariner/pkg/cableengine/syncer"
 	submarinerClientset "github.com/submariner-io/submariner/pkg/client/clientset/versioned"
 	"github.com/submariner-io/submariner/pkg/controllers/datastoresyncer"
+	"github.com/submariner-io/submariner/pkg/controllers/globalnetdataplane"
 	"github.com/submariner-io/submariner/pkg/controllers/tunnel"
 	"github.com/submariner-io/submariner/pkg/endpoint"
 	"github.com/submariner-io/submariner/pkg/natdiscovery"
@@ -98,8 +99,10 @@ func main() {
 	httpServer := startHTTPServer()
 
 	var submSpec types.SubmarinerSpecification
+	var globalnetSpec globalnetdataplane.Specification
 
 	fatalOnErr(envconfig.Process("submariner", &submSpec), "Error processing env vars")
+	fatalOnErr(envconfig.Process("submariner", &globalnetSpec), "Error processing env vars")
 
 	cfg, err := clientcmd.BuildConfigFromFlags(localMasterURL, localKubeconfig)
 	fatalOnErr(err, "Error building kubeconfig")
@@ -153,6 +156,15 @@ func main() {
 		}
 	}
 
+	var globalnetGatewayMonitor globalnetdataplane.Interface
+	if len(globalnetSpec.GlobalCIDR) > 0 {
+		globalnetGatewayMonitor, err = globalnetdataplane.NewGatewayMonitor(globalnetSpec, append(localCluster.Spec.ClusterCIDR, localCluster.Spec.ServiceCIDR...),
+			&watcher.Config{RestConfig: cfg})
+		if err != nil {
+			klog.Fatalf("Error creating gatewayMonitor: %s", err.Error())
+		}
+	}
+
 	cableEngineSyncer := syncer.NewGatewaySyncer(
 		cableEngine,
 		submarinerClient.SubmarinerV1().Gateways(submSpec.Namespace),
@@ -162,6 +174,8 @@ func main() {
 		klog.Info("Uninstalling the submariner gateway engine")
 
 		uninstallGateway(cableEngine, cableEngineSyncer, dsSyncer)
+		// Clean up all globalnet specific datapath bits
+		globalnetdataplane.UninstallDataPath()
 
 		return
 	}
@@ -187,7 +201,7 @@ func main() {
 
 		var wg sync.WaitGroup
 
-		wg.Add(4)
+		wg.Add(5)
 
 		go func() {
 			defer wg.Done()
@@ -219,6 +233,17 @@ func main() {
 			if cableHealthchecker != nil {
 				if err = cableHealthchecker.Start(stopCh); err != nil {
 					klog.Errorf("Error starting healthChecker: %v", err)
+				}
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+
+			if globalnetGatewayMonitor != nil {
+				// TODO(astoycos) Write the globalnetGWMonitor controller to stop on channel shutdown
+				if err = globalnetGatewayMonitor.Start(); err != nil {
+					klog.Fatalf("Error running gatewayMonitor: %s", err.Error())
 				}
 			}
 		}()
