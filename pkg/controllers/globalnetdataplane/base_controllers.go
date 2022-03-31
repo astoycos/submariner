@@ -29,6 +29,7 @@ import (
 	"github.com/pkg/errors"
 	resourceUtil "github.com/submariner-io/admiral/pkg/resource"
 	"github.com/submariner-io/admiral/pkg/syncer"
+	"github.com/submariner-io/admiral/pkg/util"
 	"github.com/submariner-io/submariner/pkg/globalnet/constants"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -229,4 +230,10 @@ func shouldProcessClusterGlobalEgressIP(obj *unstructured.Unstructured, op synce
 	}
 
 	return nodeName == strings.TrimSuffix(name, "-"+constants.ClusterGlobalEgressIPName)
+}
+
+// for globalnetdataplane controllers if spec OR status has updated react to the event
+func AreSpecsAndStatusEquivalent(obj1, obj2 *unstructured.Unstructured) bool {
+	return equality.Semantic.DeepEqual(util.GetSpec(obj1), util.GetSpec(obj2)) &&
+		equality.Semantic.DeepEqual(util.GetNestedField(obj1, "status"), util.GetNestedField(obj2, "status"))
 }

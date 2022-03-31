@@ -65,8 +65,10 @@ func NewClusterGlobalEgressIPController(config *syncer.ResourceSyncerConfig, loc
 		Federator:           federator,
 		Scheme:              config.Scheme,
 		Transform:           controller.process,
-		ResourcesEquivalent: syncer.AreSpecsEquivalent,
-		ShouldProcess:       shouldProcessClusterGlobalEgressIP,
+		ResourcesEquivalent: AreSpecsAndStatusEquivalent,
+		// Only change daplane rules for clusterGlobalEgressIP objects that are local
+		// this node where this controller is running.
+		ShouldProcess: shouldProcessClusterGlobalEgressIP,
 	})
 
 	if err != nil {
@@ -107,7 +109,7 @@ func (c *clusterGlobalEgressIPController) onCreateOrUpdate(key string, numberOfI
 	numRequeues int) bool {
 
 	if numberOfIPs != len(status.AllocatedIPs) {
-		klog.V(log.DEBUG).Infof("Update called for %q, but numberOfIPs %d are not yet allocated by globalnet controller", key, numberOfIPs)
+		klog.V(log.DEBUG).Infof("Event received for %q, but numberOfIPs %d are not yet allocated by globalnet controller", key, numberOfIPs)
 		return false
 	}
 
@@ -126,9 +128,6 @@ func (c *clusterGlobalEgressIPController) onCreateOrUpdate(key string, numberOfI
 			Reason:  "ProgramIPTableRulesFailed",
 			Message: fmt.Sprintf("Error programming egress rules: %v", err),
 		})
-
-		// IPs need to be released by globalnet controller
-		//_ = c.pool.Release(allocatedIPs...)
 
 		return true
 	}
