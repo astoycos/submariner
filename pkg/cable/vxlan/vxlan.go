@@ -316,7 +316,10 @@ func (v *vxlan) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (s
 
 	gwVtepIPs.Add(remoteVtepIP.String())
 
-	healthcheckMap[endpointInfo.Endpoint.Spec.HealthCheckIP] = remoteVtepIP
+	// This will get pick up in later endpoint event
+	if len(endpointInfo.Endpoint.Spec.HealthCheckIP) != 0 {
+		healthcheckMap[endpointInfo.Endpoint.Spec.HealthCheckIP] = remoteVtepIP
+	}
 
 	err = v.vxlanIface.AddFDB(remoteIP, "00:00:00:00:00:00")
 
@@ -624,9 +627,7 @@ func (v *vxlanIface) addRoutesForHealthcheck(healthcheckMap map[string]net.IP) e
 			LinkIndex: v.link.Index,
 			Dst:       netlink.NewIPNet(net.ParseIP(healthCheckIP)),
 			Gw:        gwVtepIP,
-			Type:      netlink.NDA_DST,
-			Flags:     netlink.NTF_SELF,
-			Priority:  50,
+			Priority:  99,
 			Table:     TableID,
 		}
 		err := netlink.RouteAdd(route)
