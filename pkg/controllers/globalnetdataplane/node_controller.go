@@ -119,6 +119,7 @@ func (n *nodeController) setupRules(node *corev1.Node, op syncer.Operation) (run
 		// cniIfaceIP of the respective node. Route-agent running on the node annotates the
 		// respective node with the cniIfaceIP. In this API, we check for the presence of this
 		// annotation and process the node event only when the annotation exists.
+		klog.Infof("No cniIfaceIP allocated for node %q, writing no rules for globalnet", node.Name)
 		return nil, false
 	}
 
@@ -139,6 +140,7 @@ func (n *nodeController) setupRules(node *corev1.Node, op syncer.Operation) (run
 	return nil, false
 }
 
+// This should return false if either CNIIface IP or new GlobalIP has changed
 func (n *nodeController) onNodeUpdated(oldObj, newObj *unstructured.Unstructured) bool {
 	if oldObj.GetName() != n.nodeName {
 		return true
@@ -149,16 +151,16 @@ func (n *nodeController) onNodeUpdated(oldObj, newObj *unstructured.Unstructured
 	oldGlobalIPOnNode := oldObj.GetAnnotations()[constants.SmGlobalIP]
 	newGlobalIPOnNode := newObj.GetAnnotations()[constants.SmGlobalIP]
 
-	globalIPCleared := oldGlobalIPOnNode != "" && newGlobalIPOnNode == ""
-	if globalIPCleared || oldCNIIfaceIPOnNode != newCNIIfaceIPOnNode {
-		if oldCNIIfaceIPOnNode != "" && oldGlobalIPOnNode != "" {
-			if err := n.ipt.RemoveIngressRulesForHealthCheck(oldCNIIfaceIPOnNode, oldGlobalIPOnNode); err != nil {
-				klog.Errorf("Error deleting rules for Gateway healthcheck on node %q: %v", n.nodeName, err)
-			}
-		}
+	// globalIPCleared := oldGlobalIPOnNode != "" && newGlobalIPOnNode == ""
+	// if globalIPCleared || oldCNIIfaceIPOnNode != newCNIIfaceIPOnNode {
+	// 	if oldCNIIfaceIPOnNode != "" && oldGlobalIPOnNode != "" {
+	// 		if err := n.ipt.RemoveIngressRulesForHealthCheck(oldCNIIfaceIPOnNode, oldGlobalIPOnNode); err != nil {
+	// 			klog.Errorf("Error deleting rules for Gateway healthcheck on node %q: %v", n.nodeName, err)
+	// 		}
+	// 	}
 
-		return false
-	}
+	// 	return false
+	// }
 
-	return true
+	return (oldCNIIfaceIPOnNode == newCNIIfaceIPOnNode) && (oldGlobalIPOnNode == newGlobalIPOnNode)
 }

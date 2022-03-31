@@ -306,7 +306,18 @@ func (v *vxlan) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (s
 			return "", fmt.Errorf("failed to derive the vxlan vtepIP for %s: %w", endpointInfo.Endpoint.Spec.PrivateIP, err)
 		}
 		gwVtepIPs.Add(gwVtepIP.String())
-		healthcheckMap[connection.Endpoint.HealthCheckIP] = gwVtepIP
+
+		if len(connection.Endpoint.HealthCheckIP) != 0 {
+			healthcheckMap[connection.Endpoint.HealthCheckIP] = gwVtepIP
+		}
+
+		if len(connection.Endpoint.AllocatedIPs) != 0 {
+			allocatedIPs := []net.IP{}
+			for _, allocatedIP := range endpointInfo.Endpoint.Spec.AllocatedIPs {
+				allocatedIPs = append(allocatedIPs, net.ParseIP(allocatedIP))
+			}
+			returnRouteMap[gwVtepIP.String()] = allocatedIPs
+		}
 	}
 
 	// add the Vtep IP of the new GW
@@ -365,6 +376,7 @@ func (v *vxlan) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (s
 			healthcheckMap, err)
 	}
 
+	klog.V(log.DEBUG).Infof("Reconciling Inter Cluster Routes for remote SNAT IPs %#v", returnRouteMap)
 	err = v.vxlanIface.addReturnRoutesForRemoteSnat(returnRouteMap)
 	if err != nil {
 		return "", fmt.Errorf("failed to create return routes for remote SNAT IPs %v: %w",
@@ -675,6 +687,7 @@ func (v *vxlanIface) addReturnRoutesForRemoteSnat(returnMap map[string][]net.IP)
 			err := netlink.RouteAdd(route)
 
 			if errors.Is(err, syscall.EEXIST) {
+				klog.V(log.DEBUG).Info("Route entry exists, overriding")
 				err = netlink.RouteReplace(route)
 			}
 

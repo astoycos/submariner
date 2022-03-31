@@ -175,15 +175,15 @@ func (i *engine) installCableWithNATInfo(rnat *natdiscovery.NATEndpointInfo) err
 			// There could be scenarios where the cableName would be the same but the endpoint IP or specific driver
 			// config has changed.
 			if active.UsingIP == rnat.UseIP && active.UsingNAT == rnat.UseNAT &&
-				reflect.DeepEqual(active.Endpoint.BackendConfig, endpoint.Spec.BackendConfig) {
+				reflect.DeepEqual(active.Endpoint.BackendConfig, endpoint.Spec.BackendConfig) && reflect.DeepEqual(active.Endpoint.AllocatedIPs, endpoint.Spec.AllocatedIPs) {
 				klog.V(log.TRACE).Infof("Connection info (IP: %s, NAT: %v, BackendConfig: %v) for cable %q is unchanged"+
 					" - not re-installing", active.UsingIP, active.UsingNAT, active.Endpoint.BackendConfig, active.Endpoint.CableName)
 				return nil
 			}
 
-			klog.V(log.DEBUG).Infof("New connection info (IP: %s, NAT: %v, BackendConfig: %v) for cable %q differs from"+
-				" previous (IP: %s, NAT: %v, BackendConfig: %v) - re-installing", rnat.UseIP, rnat.UseNAT, active.Endpoint.BackendConfig,
-				active.Endpoint.CableName, active.UsingIP, active.UsingNAT, endpoint.Spec.BackendConfig)
+			klog.V(log.DEBUG).Infof("New connection info (IP: %s, NAT: %v, BackendConfig: %v, AllocatedIPs: %v) for cable %q differs from"+
+				" previous (IP: %s, NAT: %v, BackendConfig: %v, AllocatedIPs: %v) - re-installing", rnat.UseIP, rnat.UseNAT, active.Endpoint.BackendConfig, active.Endpoint.AllocatedIPs,
+				active.Endpoint.CableName, active.UsingIP, active.UsingNAT, endpoint.Spec.BackendConfig, endpoint.Spec.AllocatedIPs)
 		}
 
 		if !i.multiActiveGateways {
