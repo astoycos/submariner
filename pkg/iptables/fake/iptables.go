@@ -277,6 +277,11 @@ func (i *IPTables) RemoveEgressRulesForPods(key, ipSetName, snatIP, globalNetIPT
 	return nil
 }
 
+func (i *IPTables) AddSnatRuleForIncomingTraffic(cniIfaceIP string) error {
+	// TODO
+	return nil
+}
+
 func (i *IPTables) AddEgressRulesForNamespace(namespace, ipSetName, snatIP, globalNetIPTableMark string) error {
 	// TODO
 	return nil

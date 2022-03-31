@@ -137,6 +137,13 @@ func (n *nodeController) setupRules(node *corev1.Node, op syncer.Operation) (run
 		return nil, true
 	}
 
+	klog.Infof("Adding globalnet SNAT rules for node %q with global IP %s, CNI IP %s", node.Name, globalIP, cniIfaceIP)
+	if err := n.ipt.AddSnatRuleForIncomingTraffic(cniIfaceIP); err != nil {
+		klog.Errorf("Error programming ingress SNAT rules for Multiple Active Gateways on node %q: %v", node.Name, err)
+
+		return nil, true
+	}
+
 	return nil, false
 }
 

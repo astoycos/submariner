@@ -51,6 +51,7 @@ type Interface interface {
 	AddIngressRulesForHeadlessSvcPod(globalIP, podIP string) error
 	RemoveIngressRulesForHeadlessSvcPod(globalIP, podIP string) error
 	GetKubeProxyClusterIPServiceChainName(service *corev1.Service, kubeProxyServiceChainPrefix string) (string, bool, error)
+	AddSnatRuleForIncomingTraffic(cniIfaceIP string) error
 	AddIngressRulesForHealthCheck(cniIfaceIP, globalIP string) error
 	RemoveIngressRulesForHealthCheck(cniIfaceIP, globalIP string) error
 	AddEgressRulesForHeadlessSVCPods(key, sourceIP, snatIP, globalNetIPTableMark string) error
@@ -316,6 +317,17 @@ func (i *iptablesWrapper) GetKubeProxyClusterIPServiceChainName(service *corev1.
 	}
 
 	return "", false, nil
+}
+
+func (i *iptablesWrapper) AddSnatRuleForIncomingTraffic(cniIfaceIP string) error {
+	ruleSpec := []string{"-i", "vxlan-tunnel", "-o", "weave", "-j", "SNAT", "--to-source", cniIfaceIP}
+	klog.V(log.DEBUG).Infof("Installing iptable ingress SNAT for Node: %s", strings.Join(ruleSpec, " "))
+
+	if err := i.Insert("nat", constants.SmGlobalnetEgressChain, 1, ruleSpec...); err != nil {
+		return errors.Wrapf(err, "error inserting iptables rule \"%s\"", strings.Join(ruleSpec, " "))
+	}
+
+	return nil
 }
 
 func (i *iptablesWrapper) AddIngressRulesForHealthCheck(cniIfaceIP, globalIP string) error {
