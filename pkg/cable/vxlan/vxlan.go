@@ -296,6 +296,7 @@ func (v *vxlan) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (s
 
 	gwVtepIPs := stringset.NewSynchronized()
 	healthcheckMap := map[string]net.IP{}
+	returnRouteMap := map[string][]net.IP{}
 
 	// add the VTEP IP of existing GWs
 	for _, connection := range v.connections {
@@ -316,9 +317,19 @@ func (v *vxlan) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (s
 
 	gwVtepIPs.Add(remoteVtepIP.String())
 
-	// This will get pick up in later endpoint event
+	// This will get pick up in later endpoint event if not assigned a globalIP yet from globalnet-controller
 	if len(endpointInfo.Endpoint.Spec.HealthCheckIP) != 0 {
 		healthcheckMap[endpointInfo.Endpoint.Spec.HealthCheckIP] = remoteVtepIP
+	}
+
+	// Add return routes for traffic based on SNAT IPs of remote gateways, if not yet set it will be picked up by latter
+	// update
+	if len(endpointInfo.Endpoint.Spec.AllocatedIPs) != 0 {
+		allocatedIPs := []net.IP{}
+		for _, allocatedIP := range endpointInfo.Endpoint.Spec.AllocatedIPs {
+			allocatedIPs = append(allocatedIPs, net.ParseIP(allocatedIP))
+		}
+		returnRouteMap[remoteVtepIP.String()] = allocatedIPs
 	}
 
 	err = v.vxlanIface.AddFDB(remoteIP, "00:00:00:00:00:00")
@@ -352,6 +363,12 @@ func (v *vxlan) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (s
 	if err != nil {
 		return "", fmt.Errorf("failed to create routes for healthcheckMap %v: %w",
 			healthcheckMap, err)
+	}
+
+	err = v.vxlanIface.addReturnRoutesForRemoteSnat(returnRouteMap)
+	if err != nil {
+		return "", fmt.Errorf("failed to create return routes for remote SNAT IPs %v: %w",
+			returnRouteMap, err)
 	}
 
 	v.connections = append(v.connections, v1.Connection{
@@ -641,6 +658,32 @@ func (v *vxlanIface) addRoutesForHealthcheck(healthcheckMap map[string]net.IP) e
 		}
 
 		klog.V(log.DEBUG).Infof("Successfully added the route entry %v", route)
+	}
+	return nil
+}
+
+func (v *vxlanIface) addReturnRoutesForRemoteSnat(returnMap map[string][]net.IP) error {
+	for gwVtepIP, snatIPs := range returnMap {
+		for _, snatIP := range snatIPs {
+			route := &netlink.Route{
+				LinkIndex: v.link.Index,
+				Dst:       netlink.NewIPNet(snatIP),
+				Gw:        net.ParseIP(gwVtepIP),
+				Priority:  98,
+				Table:     TableID,
+			}
+			err := netlink.RouteAdd(route)
+
+			if errors.Is(err, syscall.EEXIST) {
+				err = netlink.RouteReplace(route)
+			}
+
+			if err != nil {
+				return errors.Wrapf(err, "unable to add the route entry %v", route)
+			}
+
+			klog.V(log.DEBUG).Infof("Successfully added the route entry %v", route)
+		}
 	}
 	return nil
 }
