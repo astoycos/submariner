@@ -101,6 +101,10 @@ func (d *DatastoreSyncer) Start(stopCh <-chan struct{}) error {
 		if err := d.startNodeWatcher(stopCh); err != nil {
 			return errors.WithMessage(err, "startNodeWatcher returned error")
 		}
+
+		if err := d.startClusterGlobalEgressIPWatcher(stopCh); err != nil {
+			return errors.WithMessage(err, "startClusterGlobalEgressIPWatcher returned error")
+		}
 	}
 
 	klog.Info("Datastore syncer started")
@@ -290,6 +294,40 @@ func (d *DatastoreSyncer) createNodeWatcher(stopCh <-chan struct{}) error {
 	err = resourceWatcher.Start(stopCh)
 	if err != nil {
 		return errors.Wrap(err, "error starting the resource watcher")
+	}
+
+	return nil
+}
+
+func (d *DatastoreSyncer) startClusterGlobalEgressIPWatcher(stopCh <-chan struct{}) error {
+	return d.createClusterGlobalEgressIPWatcher(stopCh)
+}
+
+func (d *DatastoreSyncer) createClusterGlobalEgressIPWatcher(stopCh <-chan struct{}) error {
+	resourceWatcher, err := watcher.New(&watcher.Config{
+		Scheme:     scheme.Scheme,
+		RestConfig: d.syncerConfig.LocalRestConfig,
+		RestMapper: d.syncerConfig.RestMapper,
+		Client:     d.syncerConfig.LocalClient,
+		ResourceConfigs: []watcher.ResourceConfig{
+			{
+				Name:                "ClusterGlobalEgressIP watcher for datastoresyncer",
+				ResourceType:        &submarinerv1.ClusterGlobalEgressIP{},
+				Handler: watcher.EventHandlerFuncs{
+					OnCreateFunc: d.handleCreateOrUpdateClusterGlobalEgressIP,
+					OnUpdateFunc: d.handleCreateOrUpdateClusterGlobalEgressIP,
+					OnDeleteFunc: d.handleDeleteClusterGlobalEgressIP,
+				},
+			},
+		},
+	})
+	if err != nil {
+		return errors.Wrap(err, "error creating resource watcher for ClusterGlobalEgressIPs")
+	}
+
+	err = resourceWatcher.Start(stopCh)
+	if err != nil {
+		return errors.Wrap(err, "error starting the resource watcher for ClusterGlobalEgressIPs")
 	}
 
 	return nil
