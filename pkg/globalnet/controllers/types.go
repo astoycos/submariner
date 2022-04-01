@@ -24,7 +24,6 @@ import (
 	"github.com/submariner-io/admiral/pkg/stringset"
 	"github.com/submariner-io/admiral/pkg/syncer"
 	"github.com/submariner-io/admiral/pkg/watcher"
-	iptiface "github.com/submariner-io/submariner/pkg/globalnet/controllers/iptables"
 	"github.com/submariner-io/submariner/pkg/ipam"
 	"github.com/submariner-io/submariner/pkg/ipset"
 	"github.com/submariner-io/submariner/pkg/iptables"
@@ -88,8 +87,6 @@ type gatewayMonitor struct {
 	endpointWatcher watcher.Interface
 	spec            Specification
 	ipt             iptables.Interface
-	isGatewayNode   bool
-	nodeName        string
 	syncMutex       sync.Mutex
 	localSubnets    []string
 	remoteSubnets   stringset.Interface
@@ -103,8 +100,7 @@ type baseSyncerController struct {
 
 type baseIPAllocationController struct {
 	*baseSyncerController
-	pool     *ipam.IPPool
-	iptIface iptiface.Interface
+	pool *ipam.IPPool
 }
 
 type globalEgressIPController struct {
@@ -137,7 +133,6 @@ type serviceExportController struct {
 	*baseSyncerController
 	services             dynamic.NamespaceableResourceInterface
 	ingressIPs           dynamic.ResourceInterface
-	iptIface             iptiface.Interface
 	podControllers       *IngressPodControllers
 	endpointsControllers *ServiceExportEndpointsControllers
 	scheme               *runtime.Scheme
@@ -151,8 +146,7 @@ type serviceController struct {
 
 type nodeController struct {
 	*baseIPAllocationController
-	nodeName string
-	nodes    dynamic.ResourceInterface
+	nodes dynamic.ResourceInterface
 }
 
 type ingressPodController struct {
