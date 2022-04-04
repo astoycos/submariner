@@ -34,7 +34,7 @@ func (d *DatastoreSyncer) handleCreateOrUpdateClusterGlobalEgressIP(obj runtime.
 	klog.V(log.DEBUG).Infof("Update called for globalegressIP %s datastoreSyncer's Hostname %s", clusterGlobalEgressIP.ObjectMeta.Name, d.localNodeName)
 
 	if clusterGlobalEgressIP.Name != constants.ClusterGlobalEgressIPName {
-		if !strings.HasPrefix(clusterGlobalEgressIP.Name, d.localNodeName) {
+		if d.localNodeName != strings.TrimSuffix(clusterGlobalEgressIP.Name, "-"+constants.ClusterGlobalEgressIPName) {
 			return false
 		}
 	}
