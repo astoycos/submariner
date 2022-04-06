@@ -36,6 +36,7 @@ import (
 	netlinkAPI "github.com/submariner-io/submariner/pkg/netlink"
 	"github.com/submariner-io/submariner/pkg/routeagent_driver/cni"
 	"github.com/submariner-io/submariner/pkg/types"
+	"github.com/submariner-io/submariner/pkg/util"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"k8s.io/klog"
@@ -285,6 +286,11 @@ func (v *vxlan) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (s
 
 	// add the VTEP IP of existing GWs
 	for _, connection := range v.connections {
+		// Only add multipath routing to other GWs backing the same globbalnet subnets
+		if !util.CompareSlices(v.localEndpoint.Spec.Subnets, connection.Endpoint.Subnets) {
+			continue
+		}
+
 		// add the Vtep IP of the new GW
 		gwVtepIP, err := v.getVxlanVtepIPAddress(connection.Endpoint.PrivateIP)
 		if err != nil {

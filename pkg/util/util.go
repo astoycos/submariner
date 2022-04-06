@@ -135,6 +135,15 @@ func CompareEndpointSpec(left, right *subv1.EndpointSpec) bool {
 		left.Backend == right.Backend && equality.Semantic.DeepEqual(left.BackendConfig, right.BackendConfig)
 }
 
+func CompareSlices(left, right []string) bool {
+	for i, subnet := range left {
+		if subnet != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func EnsureValidName(name string) string {
 	// K8s only allows lower case alphanumeric characters, '-' or '.'. Regex used for validation is
 	// '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*'
