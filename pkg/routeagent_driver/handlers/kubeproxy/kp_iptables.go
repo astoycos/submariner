@@ -90,21 +90,25 @@ func (kp *SyncHandler) GetNetworkPlugins() []string {
 	}
 }
 
-func (kp *SyncHandler) addGwIp(ip string) {
+func (kp *SyncHandler) addGwIP(ip string) {
 	kp.gwIPs.Add(ip)
+
 	vtepIP, err := getVxlanVtepIPAddress(ip)
 	if err != nil {
 		klog.Errorf("failed to derive the vxlan vtepIP for %s: %v", ip, err)
 	}
+
 	kp.gwVTEPs.Add(vtepIP.String())
 }
 
-func (kp *SyncHandler) removeGwIp(ip string) {
+func (kp *SyncHandler) removeGwIP(ip string) {
 	kp.gwIPs.Remove(ip)
+
 	vtepIP, err := getVxlanVtepIPAddress(ip)
 	if err != nil {
 		klog.Errorf("failed to derive the vxlan vtepIP for %s: %v", ip, err)
 	}
+
 	kp.gwVTEPs.Remove(vtepIP.String())
 }
 

@@ -37,6 +37,7 @@ func (kp *SyncHandler) NodeCreated(node *k8sV1.Node) error {
 			// shortcircut and don't add fdb entry for it
 			_, ok := node.Labels["submariner.io/gateway"]
 			kp.populateRemoteVtepIps(node.Status.Addresses[i].Address, Add, ok)
+
 			break
 		}
 	}

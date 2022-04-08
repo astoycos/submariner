@@ -96,7 +96,7 @@ func (kp *SyncHandler) createOrUpdateVxLanIface() error {
 			return nil
 		}
 
-		klog.V(log.DEBUG).Info("Creating interface %s", VxLANIface)
+		klog.V(log.DEBUG).Infof("Creating interface %s", VxLANIface)
 
 		// Config does not match, delete the existing interface and re-create it.
 		if err = kp.netLink.LinkDel(existing); err != nil {
@@ -192,9 +192,10 @@ func (iface *vxLanIface) ListFDB() (map[string]netlink.Neigh, error) {
 	}
 
 	fbdEntries := map[string]netlink.Neigh{}
-	for _, fdbEntry := range rawFdbEntries {
+	for _, fdbEntry := range rawFdbEntries { // nolint:gocritic // TODO MAG POC
 		fbdEntries[fdbEntry.IP.String()] = fdbEntry
 	}
+
 	return fbdEntries, nil
 }
 
@@ -270,7 +271,10 @@ func (kp *SyncHandler) updateVxLANInterface() error {
 	}
 
 	klog.V(log.DEBUG).Infof("Reconciling desired fdb entries %v on %q for a %s node", tunnelRemotes, VxLANIface, subNode)
-	kp.reconcileVxSubFdbEntries(tunnelRemotes...)
+
+	if err := kp.reconcileVxSubFdbEntries(tunnelRemotes...); err != nil {
+		return errors.Wrapf(err, "failed to reconcile intra-cluster fdb entries for %s", VxLANIface)
+	}
 
 	return nil
 }
@@ -280,6 +284,7 @@ func (kp *SyncHandler) reconcileVxSubFdbEntries(destinations ...string) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to list existing fdb entries")
 	}
+
 	klog.V(log.DEBUG).Infof("Existing fdb entries on vx-submariner: %v", existingEntries)
 
 	destinationsToAdd := []string{}
@@ -296,8 +301,8 @@ func (kp *SyncHandler) reconcileVxSubFdbEntries(destinations ...string) error {
 	}
 
 	// Delete stale entries, i.e whatever wasn't removed from existingEntities
-	for _, neighbor := range existingEntries {
-		err = kp.vxlanDevice.netLink.NeighDel(&neighbor)
+	for _, neighbor := range existingEntries { // nolint:gocritic // TODO MAG POC
+		err = kp.vxlanDevice.netLink.NeighDel(&neighbor) // nolint // TODO MAG POC
 		if err != nil {
 			return errors.Wrapf(err, "unable to delete the bridge fdb entry %v", neighbor)
 		}
@@ -316,8 +321,8 @@ func (kp *SyncHandler) reconcileVxSubFdbEntries(destinations ...string) error {
 		return errors.Wrap(err, "failed to generate desired fbd entries")
 	}
 
-	for _, neighbor := range desiredEntries {
-		err = kp.vxlanDevice.netLink.NeighAppend(&neighbor)
+	for _, neighbor := range desiredEntries { // nolint:gocritic // TODO MAG POC
+		err = kp.vxlanDevice.netLink.NeighAppend(&neighbor) // nolint // TODO MAG POC
 		if err != nil {
 			return errors.Wrapf(err, "unable to add the bridge fdb entry %v", neighbor)
 		}
