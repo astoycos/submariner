@@ -29,6 +29,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/submariner-io/admiral/pkg/log"
+	"github.com/submariner-io/admiral/pkg/stringset"
 	v1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
 	"github.com/submariner-io/submariner/pkg/cable"
 	"github.com/submariner-io/submariner/pkg/natdiscovery"
@@ -67,9 +68,8 @@ type vxlan struct {
 }
 
 type vxlanIface struct {
-	activeEndpointHostname string
-	link                   *netlink.Vxlan
-	vtepIP                 net.IP
+	link   *netlink.Vxlan
+	vtepIP net.IP
 }
 
 type vxlanAttributes struct {
@@ -100,7 +100,7 @@ func NewDriver(localEndpoint *types.SubmarinerEndpoint, localCluster *types.Subm
 		return nil, errors.Wrap(err, "failed to get the UDP port configuration")
 	}
 
-	if err = v.createVxlanInterface(localEndpoint.Spec.Hostname, int(port)); err != nil {
+	if err = v.createVxlanInterface(int(port)); err != nil {
 		return nil, errors.Wrap(err, "failed to setup Vxlan link")
 	}
 
@@ -108,7 +108,7 @@ func NewDriver(localEndpoint *types.SubmarinerEndpoint, localCluster *types.Subm
 }
 
 // This setup up vx-lan interface between gateway nodes of clusters.
-func (v *vxlan) createVxlanInterface(activeEndPoint string, port int) error {
+func (v *vxlan) createVxlanInterface(port int) error {
 	ipAddr := v.localEndpoint.Spec.PrivateIP
 
 	vtepIP, err := v.getVxlanVtepIPAddress(ipAddr)
@@ -134,7 +134,7 @@ func (v *vxlan) createVxlanInterface(activeEndPoint string, port int) error {
 		mtu:      vxlanMtu,
 	}
 
-	v.vxlanIface, err = newVxlanIface(attrs, activeEndPoint)
+	v.vxlanIface, err = newVxlanIface(attrs)
 	if err != nil {
 		return errors.Wrap(err, "failed to create vxlan interface on Gateway Node")
 	}
@@ -161,7 +161,7 @@ func (v *vxlan) createVxlanInterface(activeEndPoint string, port int) error {
 	return nil
 }
 
-func newVxlanIface(attrs *vxlanAttributes, activeEndPoint string) (*vxlanIface, error) {
+func newVxlanIface(attrs *vxlanAttributes) (*vxlanIface, error) {
 	iface := &netlink.Vxlan{
 		LinkAttrs: netlink.LinkAttrs{
 			Name:  attrs.name,
@@ -175,8 +175,7 @@ func newVxlanIface(attrs *vxlanAttributes, activeEndPoint string) (*vxlanIface, 
 	}
 
 	vxlanIface := &vxlanIface{
-		link:                   iface,
-		activeEndpointHostname: activeEndPoint,
+		link: iface,
 	}
 
 	if err := createvxlanIface(vxlanIface); err != nil {
@@ -280,12 +279,25 @@ func (v *vxlan) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (s
 
 	cable.RecordConnection(CableDriverName, &v.localEndpoint.Spec, &remoteEndpoint.Spec, string(v1.Connected), true)
 
-	privateIP := endpointInfo.Endpoint.Spec.PrivateIP
+	gwVtepIPs := stringset.NewSynchronized()
 
-	remoteVtepIP, err := v.getVxlanVtepIPAddress(privateIP)
-	if err != nil {
-		return endpointInfo.UseIP, fmt.Errorf("failed to derive the vxlan vtepIP for %s: %w", privateIP, err)
+	// add the VTEP IP of existing GWs
+	for _, connection := range v.connections {
+		// add the Vtep IP of the new GW
+		gwVtepIP, err := v.getVxlanVtepIPAddress(connection.Endpoint.PrivateIP)
+		if err != nil {
+			return endpointInfo.UseIP, fmt.Errorf("failed to derive the vxlan vtepIP for %s: %w", endpointInfo.Endpoint.Spec.PrivateIP, err)
+		}
+		gwVtepIPs.Add(gwVtepIP.String())
 	}
+
+	// add the Vtep IP of the new GW
+	remoteVtepIP, err := v.getVxlanVtepIPAddress(endpointInfo.Endpoint.Spec.PrivateIP)
+	if err != nil {
+		return endpointInfo.UseIP, fmt.Errorf("failed to derive the vxlan vtepIP for %s: %w", endpointInfo.Endpoint.Spec.PrivateIP, err)
+	}
+
+	gwVtepIPs.Add(remoteVtepIP.String())
 
 	err = v.vxlanIface.AddFDB(remoteIP, "00:00:00:00:00:00")
 
@@ -304,7 +316,9 @@ func (v *vxlan) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (s
 		ipAddress = nil
 	}
 
-	err = v.vxlanIface.AddRoute(allowedIPs, remoteVtepIP, ipAddress)
+	// here we need to add Multipath routing for each endpoint
+	klog.V(log.DEBUG).Infof("Reconciling Inter Cluster Routes for Remote GWs %#v", gwVtepIPs.Elements())
+	err = v.vxlanIface.reconcileInterClusterRoutes(allowedIPs, gwVtepIPs, ipAddress)
 
 	if err != nil {
 		return endpointInfo.UseIP, fmt.Errorf("failed to add route for the CIDR %q with remoteVtepIP %q and vxlanInterfaceIP %q: %w",
@@ -464,29 +478,60 @@ func (v *vxlanIface) DelFDB(ipAddress net.IP, hwAddr string) error {
 	return nil
 }
 
-func (v *vxlanIface) AddRoute(ipAddressList []net.IPNet, gwIP, ip net.IP) error {
-	for i := range ipAddressList {
+// buildDesiredRoutes will make all routes needed for inter cluster communication within
+// submariner. Specifically it will route traffic at a GW node, destined
+// for another cluster, to an active GW on the next cluster
+func (v *vxlanIface) buildDesiredRoutes(dstNetworkList []net.IPNet, gwIps stringset.Interface, ip net.IP) ([]netlink.Route, error) {
+	desiredRoutes := []netlink.Route{}
+
+	nextHops := []*netlink.NexthopInfo{}
+
+	for _, gw := range gwIps.Elements() {
+		nextHops = append(nextHops, &netlink.NexthopInfo{
+			Gw:        net.ParseIP(gw),
+			LinkIndex: v.link.Attrs().Index,
+		})
+	}
+
+	for _, remoteSubnet := range dstNetworkList {
 		route := &netlink.Route{
 			LinkIndex: v.link.Index,
 			Src:       ip,
-			Dst:       &ipAddressList[i],
-			Gw:        gwIP,
+			Dst:       &remoteSubnet,
+			MultiPath: nextHops,
 			Type:      netlink.NDA_DST,
 			Flags:     netlink.NTF_SELF,
 			Priority:  100,
 			Table:     TableID,
 		}
-		err := netlink.RouteAdd(route)
+
+		desiredRoutes = append(desiredRoutes, *route)
+	}
+
+	return desiredRoutes, nil
+}
+
+// Reconcile the routes based on the GWIPs installed on this device using rtnetlink.
+// Eventually we should move this to a common library with the code from the RA routes_iface.go
+func (v *vxlanIface) reconcileInterClusterRoutes(ipAddressList []net.IPNet, gwIPs stringset.Interface, ip net.IP) error {
+	desiredRouteList, err := v.buildDesiredRoutes(ipAddressList, gwIPs, ip)
+	if err != nil {
+		return errors.Wrapf(err, "error retrieving desired routes for link %s", v.link.Name)
+	}
+
+	// Let's now add the routes that are missing.
+	for _, route := range desiredRouteList {
+		err := netlink.RouteAdd(&route)
 
 		if errors.Is(err, syscall.EEXIST) {
-			err = netlink.RouteReplace(route)
+			err = netlink.RouteReplace(&route)
 		}
 
 		if err != nil {
 			return errors.Wrapf(err, "unable to add the route entry %v", route)
 		}
 
-		klog.V(log.DEBUG).Infof("Successfully added the route entry %v and gw ip %v", route, gwIP)
+		klog.V(log.DEBUG).Infof("Successfully added the route entry %+v", route)
 	}
 
 	return nil
